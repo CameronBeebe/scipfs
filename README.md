@@ -44,12 +44,29 @@
 
 To use SciPFS, you need to have Python 3.8+ installed, along with a running IPFS daemon. Follow these steps to install SciPFS:
 
-1. **Install SciPFS**:
-   ```bash
-   pip install scipfs
-   ```
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/CameronBeebe/scipfs.git
+    cd scipfs
+    ```
 
-2. **Ensure IPFS is installed and running** (see [Setting Up IPFS](#setting-up-ipfs)).
+2.  **Install the package:**
+
+    You can install the package in two ways:
+
+    *   **Regular install:**
+        ```bash
+        pip install .
+        ```
+        This will install the package as it is.
+
+    *   **Editable (developer) install:**
+        ```bash
+        pip install -e .
+        ```
+        This is recommended if you plan to modify the code or contribute to development. It installs the package in a way that your changes to the source code are immediately reflected without needing to reinstall.
+
+3. **Ensure IPFS is installed and running** (see [Setting Up IPFS](#setting-up-ipfs)).
 
 ---
 

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import logging
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ def save_config(config: dict) -> None:
         logger.error(f"Error saving config file {CONFIG_FILE}: {e}")
         raise # Re-raise the exception for the CLI to handle
 
-def get_username() -> str | None:
+def get_username() -> Optional[str]:
     """Convenience function to get the configured username."""
     return load_config().get("username")
 
