@@ -146,3 +146,16 @@ class IPFSClient:
         except Exception as e:
             logger.error("Unexpected error resolving IPNS name %s: %s", ipns_name, e)
             raise
+
+    def get_pinned_cids(self) -> set[str]:
+        """Retrieve a set of all CIDs currently pinned by the local IPFS node."""
+        try:
+            pinned_items = self.client.pin.ls(type='recursive') # Get all recursively pinned items
+            # The response is like: {'Keys': {<cid>: {'Type': 'recursive'}, ...}}
+            cids = set(pinned_items.get('Keys', {}).keys())
+            logger.info("Retrieved %d pinned CIDs from the local node.", len(cids))
+            return cids
+        except Exception as e:
+            logger.error("Failed to retrieve pinned CIDs: %s", e)
+            # Return an empty set on error to allow dependant commands to function gracefully
+            return set()

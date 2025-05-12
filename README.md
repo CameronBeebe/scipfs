@@ -26,6 +26,7 @@
    - [Updating a Library (Getting Latest Changes)](#updating-a-library-getting-latest-changes)
    - [Viewing Library Info](#viewing-library-info)
    - [Listing Local Libraries](#listing-local-libraries)
+   - [Listing Pinned Library Files](#listing-pinned-library-files)
    - [Enabling Shell Autocompletion (Recommended)](#enabling-shell-autocompletion-recommended)
 5. [Group Coordination (via IPNS)](#group-coordination-via-ipns)
    - [Sharing the Library (via IPNS Name)](#sharing-the-library-via-ipns-name)
@@ -234,12 +235,38 @@ scipfs list <library_name>
 To download a file:
 
 ```bash
-scipfs get <library_name> <file_name> <output_path>
+scipfs get <library_name> <file_name> <output_path> [--pin]
 ```
 
 - `<library_name>`: Library name.
 - `<file_name>`: File to download.
-- `<output_path>`: Local save path.
+- `<output_path>`: Local save path. This can be a full file path, or a directory (in which case the file is saved with its original name into that directory).
+- `--pin` (Optional): If specified, the downloaded file will also be pinned to your local IPFS node. Pinning a file tells your IPFS node to keep a persistent copy of it, making it available to you and others on the IPFS network even if the original provider goes offline. This is a good way to help ensure the durability and availability of files in a shared library.
+
+To download all files from a library:
+
+```bash
+scipfs get <library_name> --all [<output_directory>] [--pin]
+```
+
+- If `<output_directory>` is provided, files are saved there.
+- If `<output_directory>` is omitted, files are saved into a new directory named after the library in your current location.
+- `--pin` (Optional): If specified, all downloaded files will also be pinned to your local IPFS node.
+
+Examples:
+```bash
+# Download a single file
+scipfs get my-research-papers report.pdf ./downloads/
+
+# Download and pin a single file
+scipfs get my-research-papers report.pdf ./downloads/report.pdf --pin
+
+# Download all files to a specific directory
+scipfs get my-research-papers --all ./all_my_papers/
+
+# Download and pin all files to a default directory (./my-research-papers/)
+scipfs get my-research-papers --all --pin
+```
 
 ### Joining an Existing Library
 
@@ -302,6 +329,22 @@ To see all the SciPFS libraries you have created or joined that have local manif
 scipfs list-local
 ```
 
+### Listing Pinned Library Files
+
+To see which files from your local SciPFS libraries are currently pinned on your IPFS node:
+
+```bash
+scipfs list-pinned
+```
+
+This command:
+1. Retrieves all CIDs pinned on your local IPFS node.
+2. Checks these CIDs against the files listed in your local SciPFS library manifests.
+3. Displays a list of library files that are pinned, showing their library, name, and CID.
+4. It will also show any other CIDs that are pinned but don't correspond to known files in your SciPFS libraries (these might be manifest CIDs themselves, or other data you've pinned manually).
+
+This is useful for understanding what SciPFS-managed content you are actively helping to keep available on the IPFS network.
+
 ### Enabling Shell Autocompletion (Recommended)
 
 SciPFS supports command autocompletion for shells like Bash and Zsh, which can greatly improve usability (e.g., by allowing you to tab-complete library names or file names within libraries for the `get` command).
@@ -348,7 +391,7 @@ SciPFS uses IPNS to simplify sharing and updating libraries.
 
 -   **For the Library Owner (Creator)**:
     -   When you add files using `scipfs add <library_name> <file_path>`, SciPFS automatically updates the local manifest, uploads the new manifest to IPFS (getting a new CID), and then **republishes this new manifest CID to the library's original IPNS name**.
-    -   Your IPFS node handles the IPNS update because it holds the private key for that IPNS name.
+    -   Your IPFS daemon must be running and connected to the network to publish IPNS updates.
 
 -   **For Library Members (Non-Owners)**:
     -   When you add files using `scipfs add <library_name> <file_path>`, your **local manifest is updated**, and a new manifest CID is generated and shown. This change is only on your machine.
@@ -364,7 +407,30 @@ SciPFS uses IPNS to simplify sharing and updating libraries.
 
 ### Pinning CIDs for Availability
 
-- Encourage all members to pin manifest and file CIDs for redundancy. SciPFS automatically pins manifests and files when they are created, added, or joined/updated.
+IPFS keeps data available as long as at least one node on the network has it and is willing to serve it. "Pinning" a Content ID (CID) on your local IPFS node tells your node to store a persistent copy of that data and make it available.
+
+- **Automatic Pinning by SciPFS**:
+    - When you `scipfs create` a library, the initial manifest is pinned.
+    - When you `scipfs add` a file, both the file itself and the updated library manifest are pinned on your node.
+    - When you `scipfs join` or `scipfs update` a library, the downloaded library manifest is pinned on your node.
+    - If you use the `--pin` option with `scipfs get`, the downloaded file(s) will be pinned on your node.
+
+- **Why Pin?**
+    - **Your own access**: Ensures files you care about are always on your local node, even if they become rare on the network.
+    - **Helping the community**: If multiple members of a library pin its files (and its manifest CIDs), the library becomes more resilient and accessible for everyone. Each node that pins content acts as another host for that data.
+
+- **Manual Pinning with IPFS**: 
+    For any CID (be it a file or a manifest), you can always use the native IPFS command to pin it:
+    ```bash
+    ipfs pin add <CID>
+    ```
+    You can find file CIDs using `scipfs list <library_name>`.
+
+- **Checking Pinned Items**: 
+    To see all CIDs your local IPFS node has pinned, use:
+    ```bash
+    ipfs pin ls
+    ```
 
 ---
 
