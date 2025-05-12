@@ -26,6 +26,7 @@
    - [Updating a Library (Getting Latest Changes)](#updating-a-library-getting-latest-changes)
    - [Viewing Library Info](#viewing-library-info)
    - [Listing Local Libraries](#listing-local-libraries)
+   - [Enabling Shell Autocompletion (Recommended)](#enabling-shell-autocompletion-recommended)
 5. [Group Coordination (via IPNS)](#group-coordination-via-ipns)
    - [Sharing the Library (via IPNS Name)](#sharing-the-library-via-ipns-name)
    - [How Library Updates Work](#how-library-updates-work)
@@ -300,6 +301,36 @@ To see all the SciPFS libraries you have created or joined that have local manif
 ```bash
 scipfs list-local
 ```
+
+### Enabling Shell Autocompletion (Recommended)
+
+SciPFS supports command autocompletion for shells like Bash and Zsh, which can greatly improve usability (e.g., by allowing you to tab-complete library names or file names within libraries for the `get` command).
+
+To enable it, you need to add a line to your shell's configuration file.
+
+**For Bash:**
+Add the following to your `~/.bashrc` or `~/.bash_profile`:
+```bash
+eval "$(_SCIPFS_COMPLETE=bash_source scipfs)"
+```
+
+**For Zsh:**
+Add the following to your `~/.zshrc`. Make sure these lines appear *after* any lines that initialize your Zsh framework (like Oh My Zsh, Prezto, etc.), if you use one, but *before* you try to use the completion:
+
+```bash
+autoload -U compinit && compinit # Load Zsh's completion system
+eval "$(_SCIPFS_COMPLETE=zsh_source scipfs)"
+```
+
+If you're not using a Zsh framework, placing these lines towards the end of your `~/.zshrc` is generally safe.
+
+**For Fish:**
+Add the following to your `~/.config/fish/completions/scipfs.fish` (create the file if it doesn't exist):
+```fish
+eval (env _SCIPFS_COMPLETE=fish_source scipfs)
+```
+
+After adding the line, restart your shell or source the configuration file (e.g., `source ~/.bashrc`) for the changes to take effect. You should then be able to use tab completion for `scipfs` commands and arguments.
 
 ---
 

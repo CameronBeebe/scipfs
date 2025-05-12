@@ -5,13 +5,71 @@ from .ipfs import IPFSClient
 from .library import Library
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
+import os # Added for path operations
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Basic config for the whole application, individual loggers can be adjusted
+logging.basicConfig(stream=sys.stderr, level=logging.INFO) # Ensure logs go to stderr by default
+logger = logging.getLogger(__name__) # Logger for this cli.py module
+library_logger = logging.getLogger("scipfs.library") # Get the specific library logger
 
 # Default configuration directory
 CONFIG_DIR = Path.home() / ".scipfs"
+
+# Shell completion for library file names
+def complete_file_names(ctx, param, incomplete):
+    """Provides autocompletion for file names within a specified library for the get command."""
+    # ctx.params should contain the arguments parsed so far
+    # For 'scipfs get <name> <file_name>', 'name' should be in ctx.params
+    library_name = ctx.params.get('name')
+    if not library_name:
+        return []
+    
+    original_level = library_logger.level
+    library_logger.setLevel(logging.ERROR) # Suppress INFO logs from library module
+    
+    try:
+        # We don't need a full IPFS client connection just for listing files from manifest
+        # Minimal library init to load manifest for listing files:
+        # Temporarily suppress IPFSClient connection errors if any, for completion speed.
+        class MinimalIPFSClient:
+            def add_json(self, _):
+                return "dummy_cid_for_completion"
+            def get_json(self, _):
+                return {}
+            def pin(self, _):
+                pass
+            def unpin(self, _):
+                pass
+            def add_file(self, _):
+                return "dummy_cid_for_completion"
+            def get_file(self, _, __):
+                pass
+            def resolve_ipns_name(self, _):
+                return "/ipfs/dummy_cid_for_completion"
+            def publish_to_ipns(self, _, __):
+                pass
+            def generate_ipns_key(self, _):
+                return {"Name": "dummy_key", "Id": "dummy_id_for_completion"}
+            def list_ipns_keys(self):
+                return []
+            def remove_ipns_key(self, _):
+                pass
+
+        library = Library(library_name, CONFIG_DIR, MinimalIPFSClient()) 
+        if library.manifest_path.exists():
+            # list_files returns a list of dicts, each with a 'name' key
+            return [
+                file_info['name'] for file_info in library.list_files() 
+                if file_info['name'].startswith(incomplete)
+            ]
+    except Exception:
+        # Log to a debug file or stderr if needed, but don't break completion
+        # For example: print(f"Completion error: {e}", file=sys.stderr)
+        pass # Silently fail on error to avoid breaking completion
+    finally:
+        library_logger.setLevel(original_level) # Restore original logging level
+    return []
 
 @click.group()
 def cli():
@@ -217,50 +275,127 @@ def list_cmd(name: str):
 
 @cli.command()
 @click.argument("name")
-@click.argument("file_name")
-@click.argument("output_path", type=click.Path(path_type=Path))
-def get(name: str, file_name: str, output_path: Path):
-    """Download a file from the specified library.
+@click.argument("file_name", required=False, shell_complete=complete_file_names)
+@click.argument("output_path", type=click.Path(path_type=Path), required=False)
+@click.option("--all", "all_files", is_flag=True, help="Download all files from the library.")
+def get(name: str, file_name: str, output_path: Path, all_files: bool):
+    """Download file(s) from the specified library.
 
-    Retrieves the file's CID from the local library manifest, then downloads
-    it from IPFS. Does not automatically pin the file.
+    If --all is specified, downloads all files in the library.
+    The FILE_NAME argument is ignored if --all is used.
+    If OUTPUT_PATH is provided with --all, it's used as the target directory.
+    If OUTPUT_PATH is not provided with --all, files are downloaded into a
+    new directory named after the library in the current working directory.
+
+    When not using --all, FILE_NAME and OUTPUT_PATH are required to specify
+    which file to download and where to save it.
 
     Arguments:
       NAME: The name of the library.
-      FILE_NAME: The name of the file to download.
-      OUTPUT_PATH: Local path to save the file. If a directory, saves with original name.
+      FILE_NAME: The name of the file to download (ignored if --all is used).
+      OUTPUT_PATH: Local path to save the file, or directory for --all.
 
     Examples:
-      scipfs get my-research-papers paper1.pdf ./downloads/
+      scipfs get my-library report.pdf ./downloads/report.pdf
+      scipfs get my-library --all ./downloaded_library_files/
+      scipfs get my-library --all
     """
     try:
         ipfs_client = IPFSClient()
         library = Library(name, CONFIG_DIR, ipfs_client)
+
         if not library.manifest_path.exists():
-             click.echo(f"Error: Local manifest for library '{name}' not found at {library.manifest_path}.", err=True)
-             click.echo(f"Hint: Did you create or join the library '{name}' first?", err=True)
-             sys.exit(1)
+            click.echo(f"Error: Local manifest for library '{name}' not found at {library.manifest_path}.", err=True)
+            click.echo(f"Hint: Did you 'create' or 'join' the library '{name}' first?", err=True)
+            sys.exit(1)
 
-        # Determine final output path (handle directory case)
-        final_output_path = output_path
-        if output_path.is_dir():
-            final_output_path = output_path / file_name
+        if all_files:
+            # If --all is used, and file_name is given but output_path is not,
+            # assume file_name was intended as the output_path.
+            if file_name and output_path is None:
+                try:
+                    # Attempt to convert file_name to a Path object
+                    # This also helps validate if it's a plausible path string
+                    output_path = Path(file_name)
+                    file_name = None # Clear file_name as it has been re-assigned
+                except TypeError:
+                    # file_name was not a valid path string, treat as an actual file_name
+                    # and let the later logic warn if file_name is ignored.
+                    pass # output_path remains None
 
-        # Check if file already exists before attempting download? Optional.
-        if final_output_path.exists():
-             click.echo(f"Warning: Output file already exists: {final_output_path}", err=True)
-             # Maybe add a --force option later? For now, we'll overwrite.
+            if file_name:
+                click.echo(f"Warning: FILE_NAME ('{file_name}') is ignored when --all is used.", err=True)
 
-        click.echo(f"Attempting to download '{file_name}' from library '{name}' to {final_output_path}...")
-        library.get_file(file_name, final_output_path)
-        click.echo(f"Successfully downloaded '{file_name}' to {final_output_path}")
+            files_to_download = library.list_files()
+            if not files_to_download:
+                click.echo(f"No files found in library '{name}'.")
+                return
 
-    except KeyError: # Raised by library.get_file if file_name not in manifest
-        click.echo(f"Error: File '{file_name}' not found in the manifest for library '{name}'.", err=True)
-        click.echo(f"Hint: Use 'scipfs list {name}' to see available files.", err=True)
+            if output_path:
+                target_dir = output_path
+                # Ensure target_dir is a directory and exists
+                if target_dir.exists() and not target_dir.is_dir():
+                    click.echo(f"Error: Output path '{target_dir}' exists and is not a directory.", err=True)
+                    sys.exit(1)
+                target_dir.mkdir(parents=True, exist_ok=True)
+            else:
+                target_dir = Path.cwd() / name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                click.echo(f"No output path specified. Files will be downloaded to ./{name}/")
+
+            click.echo(f"About to download {len(files_to_download)} file(s) from library '{name}' to '{target_dir}'.")
+            if not click.confirm("Proceed?"):
+                click.echo("Download cancelled.")
+                return
+
+            for file_info in files_to_download:
+                f_name = file_info['name']
+                dest_path = target_dir / f_name
+                try:
+                    click.echo(f"Downloading '{f_name}' to '{dest_path}'...")
+                    library.get_file(f_name, dest_path)
+                    click.echo(f"Successfully downloaded '{f_name}'.")
+                except FileNotFoundError:
+                    click.echo(f"Error: File '{f_name}' not found in library manifest (CID might be missing or invalid).", err=True)
+                except Exception as e_file:
+                    click.echo(f"Error downloading file '{f_name}': {e_file}", err=True)
+            click.echo("Finished downloading all files.")
+
+        else: # Not --all, so download a single specified file
+            if not file_name or not output_path:
+                click.echo("Error: FILE_NAME and OUTPUT_PATH are required when not using --all.", err=True)
+                click.echo("Usage: scipfs get <library_name> <file_name> <output_path>")
+                click.echo("Or:    scipfs get <library_name> --all [output_directory]")
+                sys.exit(1)
+            
+            # Determine final output path for single file download
+            if output_path.is_dir():
+                final_output_path = output_path / file_name
+            else:
+                final_output_path = output_path
+            
+            # Ensure the parent directory of the final output path exists
+            final_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                click.echo(f"Downloading '{file_name}' from library '{name}' to '{final_output_path}'...")
+                library.get_file(file_name, final_output_path)
+                click.echo(f"Successfully downloaded '{file_name}' to '{final_output_path}'.")
+            except FileNotFoundError: # This can be from library.get_file if file not in manifest
+                click.echo(f"Error: File '{file_name}' not found in library '{name}'. Check the manifest.", err=True)
+                sys.exit(1)
+            except Exception as e:
+                click.echo(f"An unexpected error occurred during 'get': {e}", err=True)
+                sys.exit(1)
+
+    except FileNotFoundError as e: # Should primarily catch issue with library manifest itself
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except ValueError as e: # From Library init if manifest is malformed for example
+        click.echo(f"Error processing library '{name}': {e}", err=True)
         sys.exit(1)
     except Exception as e:
-        click.echo(f"Error downloading file: {e}", err=True)
+        click.echo(f"An unexpected error occurred: {e}", err=True)
         sys.exit(1)
 
 @cli.command(name="list-local")
