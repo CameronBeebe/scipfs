@@ -5,8 +5,10 @@ from .ipfs import IPFSClient
 from .library import Library
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
+from . import __version__ as scipfs_version # Import scipfs version
 import os # Added for path operations
 from typing import Set, Dict, List, Optional # Added Set, Dict, Optional
+import ipfshttpclient # Import ipfshttpclient to get its version
 
 # Configure logging
 # Basic config for the whole application, individual loggers can be adjusted
@@ -822,6 +824,137 @@ def availability_cmd(ctx, name: str, file_name_option: Optional[str], cmd_verbos
                 click.echo(f"Providers for {description}: None found or error during lookup.")
 
     click.echo("\nAvailability check complete.")
+
+@cli.command()
+@click.pass_context
+def doctor(ctx):
+    """Check the SciPFS setup and IPFS daemon connection.
+
+    Provides diagnostic information about your SciPFS environment,
+    including versions, IPFS daemon status, and compatibility notes.
+    """
+    click.echo("--- SciPFS Doctor ---")
+    click.echo(f"SciPFS Version: {scipfs_version}")
+    try:
+        click.echo(f"ipfshttpclient Version: {ipfshttpclient.__version__}")
+    except AttributeError:
+        click.echo("ipfshttpclient Version: Could not determine (ensure library is correctly installed).")
+
+    click.echo("\n--- IPFS Daemon Status ---")
+    try:
+        ipfs_client = IPFSClient() # Attempts connection
+        click.echo("Status: Successfully connected to IPFS daemon.")
+        
+        try:
+            daemon_version_info = ipfs_client.client.version() # dict
+            daemon_version = daemon_version_info.get("Version", "N/A")
+            click.echo(f"IPFS Daemon Version: {daemon_version}")
+        except Exception as e:
+            click.echo(f"IPFS Daemon Version: Error fetching version - {e}")
+            daemon_version = "N/A" # Ensure daemon_version is defined
+
+        try:
+            peer_id_info = ipfs_client.client.id() # dict
+            peer_id = peer_id_info.get("ID", "N/A")
+            click.echo(f"IPFS Peer ID: {peer_id}")
+        except Exception as e:
+            click.echo(f"IPFS Peer ID: Error fetching Peer ID - {e}")
+            # If daemon_version was fetched but peer_id failed, daemon_version is still valid
+            # If daemon_version failed, it's already N/A or Unknown
+            peer_id = "N/A" # Ensure peer_id is defined for logic below
+
+        click.echo("\n--- Compatibility and Update Advice ---")
+        client_version_str = "Unknown"
+        try:
+            client_version_str = ipfshttpclient.__version__
+            click.echo(f"scipfs is using ipfshttpclient version: {client_version_str}")
+        except AttributeError:
+            click.echo("Could not determine the version of the ipfshttpclient library being used by scipfs.")
+        except Exception as e:
+            click.echo(f"Error determining ipfshttpclient version: {e}")
+
+        if daemon_version != "Unknown" and client_version_str != "Unknown":
+            click.echo(f"Your Kubo daemon version is {daemon_version}. Your ipfshttpclient version is {client_version_str}.")
+            # Specific version compatibility advice will be refined once scipfs standardizes on an ipfshttpclient version.
+            if client_version_str == "0.8.0a2":
+              click.echo("   Note: ipfshttpclient 0.8.0a2 (used by this scipfs) typically expects Kubo daemon versions 0.5.0 to <0.9.0.")
+              click.echo(f"   Your daemon ({daemon_version}) may cause issues if outside this range, affecting commands like 'availability'.")
+            elif client_version_str == "0.7.0":
+              click.echo("   Note: ipfshttpclient 0.7.0 generally supports Kubo daemon versions from ~0.4.23 to ~0.7.x.")
+              click.echo(f"   Your daemon ({daemon_version}) should ideally be in this range.")
+            else:
+              click.echo("   Please check ipfshttpclient documentation for compatibility with your Kubo daemon version.")
+        elif daemon_version == "Unknown":
+            click.echo("Could not determine Kubo daemon version. Unable to provide specific compatibility advice.")
+        else: # client_version_str is Unknown
+            click.echo("Could not determine ipfshttpclient version. Unable to provide specific compatibility advice.")
+
+        click.echo("\nRecommendations:")
+        click.echo("1. To update or change your Kubo (go-ipfs) daemon version:")
+        click.echo("   - Use your OS package manager (e.g., 'brew install kubo@X.Y', 'sudo apt install kubo=X.Y.Z').")
+        click.echo("   - Or, download a specific version from IPFS Distributions: https://dist.ipfs.tech/#kubo")
+        click.echo("   - GitHub releases: https://github.com/ipfs/kubo/releases")
+        click.echo("   - The 'ipfs-update' tool is DEPRECATED and should NOT be used.")
+        click.echo("2. If 'scipfs availability' or other commands have issues:")
+        click.echo("   - Ensure your Kubo daemon version is compatible with the ipfshttpclient version shown above.")
+        click.echo("   - Consider updating scipfs: 'pip install --upgrade scipfs'. This might use a more suitable ipfshttpclient.")
+
+        click.echo("\n--- 'availability' Command Check ---")
+        # This section attempts to check if the dht.findprovs API endpoint, or a CLI fallback, is working.
+        # A known, usually resolvable CID (empty directory)
+        test_cid = "QmUNLLsPACCz1vLxQVkXqqLX5R1X345qqfHbsf67hvA3Nn" 
+        api_works_fine = False
+        uses_fallback = False
+        check_error = None
+
+        try:
+            scipfs_logger.info(f"[Doctor] Attempting API call dht.findprovs for test CID {test_cid}...")
+            # We don't care about the actual providers, just if the call itself works or gives a specific error
+            # Use a short timeout
+            provs_stream = ipfs_client.client.dht.findprovs(test_cid, timeout=10) 
+            for _ in provs_stream: # Consume the stream minimally
+                pass
+            api_works_fine = True
+            click.echo("Daemon appears to support direct API for provider finding (dht.findprovs).")
+            click.echo("\'scipfs availability\' should use the faster API method.")
+
+        except ipfshttpclient.exceptions.TimeoutError:
+            check_error = "Timeout during API check. Network or daemon might be slow."
+            click.echo(f"Warning: {check_error}")
+            click.echo("\'scipfs availability\' might be slow or unreliable.")
+        except ipfshttpclient.exceptions.ErrorResponse as e:
+            error_str = str(e).lower()
+            if "use \'ipfs routing\' instead" in error_str or "no command found" in error_str:
+                uses_fallback = True
+                click.echo("Daemon does not support the direct dht.findprovs API endpoint.")
+                click.echo("\'scipfs availability\' will likely use the slower CLI fallback (`ipfs routing findprovs`).")
+                click.echo("Ensure \'ipfs\' is in your system PATH for the fallback to work.")
+            elif "routing: not found" in error_str:
+                # This means the *content* wasn't found, but the API call itself might be okay.
+                # For a doctor command, this is still a sign the API call was accepted.
+                api_works_fine = True
+                click.echo("Daemon appears to support direct API for provider finding (dht.findprovs).")
+                click.echo("(Test CID providers not found, but API call was accepted).")
+                click.echo("\'scipfs availability\' should use the faster API method.")
+            else:
+                check_error = f"IPFS error response during API check: {e}"
+                click.echo(f"Error: {check_error}")
+                click.echo("\'scipfs availability\' behavior is uncertain; it might fail or use CLI fallback.")
+        except Exception as e:
+            check_error = f"Unexpected error during API check: {e}"
+            click.echo(f"Error: {check_error}")
+            click.echo("\'scipfs availability\' behavior is uncertain.")
+
+    except ConnectionError as e:
+        click.echo(f"Status: Failed to connect to IPFS daemon. Ensure it is running and accessible. Error: {e}")
+        daemon_version = "Unknown"
+        peer_id = "Unknown"
+    except Exception as e:
+        click.echo(f"Status: An unexpected error occurred connecting to the IPFS daemon: {e}")
+        daemon_version = "Unknown"
+        peer_id = "Unknown"
+
+    click.echo("\nDoctor check complete.")
 
 # Ensure the main guard is present if this script is run directly
 if __name__ == '__main__':
