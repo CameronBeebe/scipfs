@@ -6,15 +6,26 @@ from .library import Library
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
 import os # Added for path operations
+from typing import Set, Dict, List, Optional # Added Set, Dict, Optional
 
 # Configure logging
 # Basic config for the whole application, individual loggers can be adjusted
-logging.basicConfig(stream=sys.stderr, level=logging.INFO) # Ensure logs go to stderr by default
-logger = logging.getLogger(__name__) # Logger for this cli.py module
-library_logger = logging.getLogger("scipfs.library") # Get the specific library logger
+# Set a default level that will be overridden if --verbose is used.
+logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
+
+# Get loggers for scipfs modules
+scipfs_logger = logging.getLogger("scipfs") # Root logger for the application
+# Individual module loggers can also be grabbed if needed for finer control, but often setting the root is enough.
+# For example:
+# ipfs_module_logger = logging.getLogger("scipfs.ipfs")
+# library_module_logger = logging.getLogger("scipfs.library")
 
 # Default configuration directory
 CONFIG_DIR = Path.home() / ".scipfs"
+
+# Ensure CONFIG_DIR is created if it doesn't exist for library manifests
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+scipfs_config_instance = scipfs_config.SciPFSConfig(CONFIG_DIR)
 
 # Shell completion for library file names
 def complete_file_names(ctx, param, incomplete):
@@ -72,14 +83,27 @@ def complete_file_names(ctx, param, incomplete):
     return []
 
 @click.group()
-def cli():
+@click.option("--verbose", "verbose_flag", is_flag=True, help="Enable INFO level logging for scipfs operations.")
+@click.pass_context # Needed to access the verbose_flag in the group context
+def cli(ctx, verbose_flag: bool):
     """SciPFS: Manage decentralized file libraries on IPFS.
 
     A command-line tool to create, join, and manage shared file libraries
     using the InterPlanetary File System (IPFS). Ensure your IPFS daemon
     is running before using SciPFS commands that interact with the network.
     """
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj['VERBOSE'] = verbose_flag
+    if verbose_flag:
+        scipfs_logger.setLevel(logging.INFO)
+        # If you had individual loggers and wanted them all at INFO:
+        # ipfs_module_logger.setLevel(logging.INFO)
+        # library_module_logger.setLevel(logging.INFO)
+        # logging.getLogger("scipfs.config").setLevel(logging.INFO)
+        scipfs_logger.info("Verbose logging enabled.")
+    else:
+        # Explicitly set to WARNING if not verbose, to ensure it overrides any other potential default
+        scipfs_logger.setLevel(logging.WARNING)
 
 @cli.command()
 def init():
@@ -101,7 +125,7 @@ def init():
 
 @cli.command()
 @click.argument("name")
-def create(name: str):
+def create(ctx, name: str):
     """Create a new library and its IPNS entry.
 
     Initializes a new library, generates an IPNS key named after the library,
@@ -198,7 +222,7 @@ def add(name: str, file_path: Path):
       scipfs add my-research-papers ./papers/paper1.pdf
     """
     try:
-        username = scipfs_config.get_username()
+        username = scipfs_config_instance.get_username()
         if not username:
             click.echo("Error: Username not set. Use 'scipfs config set username <your_username>' first.", err=True)
             sys.exit(1)
@@ -427,54 +451,32 @@ def get(name: str, file_name: str, output_path: Path, all_files: bool, pin_file:
         sys.exit(1)
 
 @cli.command(name="list-local")
-def list_local():
-    """List locally configured SciPFS libraries.
+def list_local_cmd():
+    """List all local SciPFS libraries."""
+    try:
+        manifest_paths = list(CONFIG_DIR.glob("*_manifest.json"))
+        if not manifest_paths:
+            click.echo("No local SciPFS libraries found.")
+            click.echo(f"(Configuration directory searched: {CONFIG_DIR.resolve()})")
+            return
 
-    Scans ~/.scipfs for manifest files and lists their names.
-    """
-    if not CONFIG_DIR.exists() or not CONFIG_DIR.is_dir():
-        click.echo(f"Configuration directory {CONFIG_DIR} not found.", err=True)
-        click.echo("Run 'scipfs init' first.", err=True)
+        click.echo("Local SciPFS Libraries:")
+        for manifest_path in manifest_paths:
+            library_name = manifest_path.name.replace("_manifest.json", "")
+            # Potentially load library to get name from manifest if different
+            try:
+                # Minimal load just to get actual name and maybe basic info
+                temp_ipfs_client = IPFSClient() # Create a temporary client instance
+                lib = Library(library_name, CONFIG_DIR, temp_ipfs_client)
+                click.echo(f"- {lib.name} (Found as: {library_name}_manifest.json)")
+            except ConnectionError:
+                 click.echo(f"- {library_name} (Manifest: {library_name}_manifest.json - Warning: Could not connect to IPFS to confirm library name)")
+            except Exception as e_load:
+                 click.echo(f"- {library_name} (Manifest: {library_name}_manifest.json - Warning: Could not fully load library: {e_load})")
+                 
+    except Exception as e:
+        click.echo(f"An unexpected error occurred during 'list-local': {e}", err=True)
         sys.exit(1)
-
-    # Use a generator directly instead of converting to list immediately
-    manifest_files_generator = CONFIG_DIR.glob("*_manifest.json")
-    
-    # Check if the generator yields any items
-    try:
-        first_file = next(manifest_files_generator)
-    except StopIteration:
-        click.echo("No local libraries found.")
-        return
-    
-    # If we got here, there's at least one file.
-    # We need to process the first file and then the rest of the generator.
-    click.echo("Locally configured libraries:")
-    
-    # Process the first file we already fetched
-    library_name_from_file = first_file.name.replace("_manifest.json", "")
-    
-    # Attempt to load manifest to get the actual name and IPNS if available
-    try:
-        ipfs_client = IPFSClient() # Needed for Library instantiation
-        lib_instance = Library(library_name_from_file, CONFIG_DIR, ipfs_client)
-        display_name = lib_instance.name # Name from manifest content
-        ipns_info = f" (IPNS: {lib_instance.ipns_name})" if lib_instance.ipns_name else ""
-        click.echo(f"- {display_name}{ipns_info}")
-    except Exception: # Fallback if manifest is broken or lib can't load
-        click.echo(f"- {library_name_from_file} (could not load details)")
-
-    # Process the rest of the generator
-    for manifest_path in manifest_files_generator:
-        library_name_from_file = manifest_path.name.replace("_manifest.json", "")
-        try:
-            ipfs_client = IPFSClient()
-            lib_instance = Library(library_name_from_file, CONFIG_DIR, ipfs_client)
-            display_name = lib_instance.name
-            ipns_info = f" (IPNS: {lib_instance.ipns_name})" if lib_instance.ipns_name else ""
-            click.echo(f"- {display_name}{ipns_info}")
-        except Exception:
-            click.echo(f"- {library_name_from_file} (could not load details)")
 
 @cli.command()
 @click.argument("name")
@@ -592,7 +594,7 @@ def set_username_cmd(username: str):
              click.echo("Error: Username must be at least 3 characters long.", err=True)
              sys.exit(1)
         
-        scipfs_config.set_username(username)
+        scipfs_config_instance.set_username(username)
         click.echo(f"Username set to: {username}")
     except Exception as e:
         click.echo(f"Error setting username: {e}", err=True)
@@ -676,6 +678,146 @@ def list_pinned_cmd():
     except Exception as e:
         click.echo(f"An unexpected error occurred during 'list-pinned': {e}", err=True)
         sys.exit(1)
+
+@cli.command(name="availability")
+@click.argument("name")
+@click.option("--file", "file_name_option", default=None, help="Check availability only for a specific file in the library.")
+@click.option("--verbose", "cmd_verbose_flag", is_flag=True, help="Show raw Peer IDs for each checked CID. Overrides global verbosity for this command.")
+@click.option("--timeout", type=int, default=60, show_default=True, help="Timeout in seconds for finding providers for each CID.")
+@click.pass_context
+def availability_cmd(ctx, name: str, file_name_option: Optional[str], cmd_verbose_flag: bool, timeout: int):
+    """Check the network availability of files in a library or a specific file.
+
+    This command uses the IPFS DHT (via API or CLI fallback) to find peers
+    (providers) for the library's manifest CID and/or specific file CIDs.
+    It provides a summary of how many providers are found.
+    
+    NOTE: Performance depends on the IPFS daemon version. Ideally, use a
+    daemon version compatible with the underlying IPFS client library 
+    (v0.5.0-v0.8.x recommended) for faster API calls. Older daemons may trigger a
+    slower fallback mechanism that executes `ipfs routing findprovs` via the CLI,
+    which requires `ipfs` to be in the system PATH.
+    """
+    # Command specific verbosity overrides global verbosity for its Peer ID list
+    show_peer_ids = cmd_verbose_flag or ctx.obj.get('VERBOSE', False)
+    
+    # The actual logging of INFO messages (like "Searching for providers...")
+    # is controlled by the global --verbose flag via scipfs_logger level.
+
+    try:
+        ipfs_client = IPFSClient()
+    except ConnectionError as e:
+        click.echo(f"Error: Could not connect to IPFS. {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error initializing IPFS client: {e}", err=True)
+        sys.exit(1)
+
+    try:
+        library = Library(name, CONFIG_DIR, ipfs_client)
+        if not library.manifest_path.exists():
+            click.echo(f"Error: Local manifest for library '{name}' not found at {library.manifest_path}.", err=True)
+            click.echo(f"Hint: Did you 'create' or 'join' the library '{name}' first?", err=True)
+            sys.exit(1)
+        # Ensure library name is loaded from manifest
+        actual_library_name = library.name 
+    except Exception as e:
+        click.echo(f"Error loading library '{name}': {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"--- Availability Report for Library '{actual_library_name}' ---")
+
+    target_cids_map: Dict[str, str] = {} # cid -> description (e.g., "manifest", "file 'x.txt'")
+    file_cids_in_report: Set[str] = set()
+
+    if file_name_option:
+        file_info = library.manifest.get("files", {}).get(file_name_option)
+        if not file_info or not file_info.get("cid"):
+            click.echo(f"Error: File '{file_name_option}' not found in library '{actual_library_name}' or missing CID.", err=True)
+            sys.exit(1)
+        file_cid = file_info["cid"]
+        target_cids_map[file_cid] = f"File '{file_name_option}'"
+        file_cids_in_report.add(file_cid)
+    else:
+        if library.manifest_cid:
+            target_cids_map[library.manifest_cid] = "Manifest"
+        else:
+            click.echo(f"Warning: Manifest CID for library '{actual_library_name}' is not available. Cannot check its providers.", err=True)
+        
+        for f_info in library.list_files():
+            if f_info.get("cid"):
+                target_cids_map[f_info["cid"]] = f"File '{f_info['name']}'"
+                file_cids_in_report.add(f_info["cid"])
+            else:
+                click.echo(f"Warning: File '{f_info['name']}' in library '{actual_library_name}' is missing a CID. Skipping.", err=True)
+
+    if not target_cids_map:
+        click.echo("No CIDs to check for providers. The library might be empty or CIDs are missing.")
+        sys.exit(0)
+
+    providers_by_cid: Dict[str, Set[str]] = {}
+    all_file_providers_peers: Set[str] = set()
+    provider_file_counts: Dict[str, int] = {}
+
+    for cid_to_check, description in target_cids_map.items():
+        click.echo(f"Finding providers for {description} ({cid_to_check})... ", nl=False)
+        try:
+            current_providers = ipfs_client.find_providers(cid_to_check, timeout=timeout)
+            providers_by_cid[cid_to_check] = current_providers
+            click.echo(f"found {len(current_providers)}.")
+            if cid_to_check in file_cids_in_report: # Only count for files for file-specific metrics
+                all_file_providers_peers.update(current_providers)
+                for peer_id in current_providers:
+                    provider_file_counts[peer_id] = provider_file_counts.get(peer_id, 0) + 1
+        except Exception as e_find:
+            click.echo(f"error: {e_find}. Skipping.", err=True)
+            providers_by_cid[cid_to_check] = set() # Store empty set on error
+
+    # Calculate Metrics
+    click.echo("\n--- Summary ---")
+
+    if file_name_option: # Specific file mode
+        file_cid_to_report = next(iter(target_cids_map.keys())) # Should be only one
+        num_prov = len(providers_by_cid.get(file_cid_to_report, set()))
+        click.echo(f"{target_cids_map[file_cid_to_report]} (CID: {file_cid_to_report}): Found {num_prov} providers.")
+    else: # All files mode
+        if library.manifest_cid and library.manifest_cid in providers_by_cid:
+            num_manifest_prov = len(providers_by_cid[library.manifest_cid])
+            click.echo(f"Manifest (CID: {library.manifest_cid}): Found {num_manifest_prov} providers.")
+        elif library.manifest_cid:
+            click.echo(f"Manifest (CID: {library.manifest_cid}): Could not retrieve providers (check logs).")
+
+        total_files_in_manifest = len([f for f in library.list_files() if f.get('cid')])
+        files_in_report_with_providers = sum(1 for cid in file_cids_in_report if len(providers_by_cid.get(cid, set())) > 0)
+        
+        if total_files_in_manifest > 0:
+            percentage_hosted = (files_in_report_with_providers / total_files_in_manifest) * 100
+            click.echo(f"Files in Manifest: {total_files_in_manifest}. Checked {len(file_cids_in_report)} file CIDs.")
+            click.echo(f"Files with at least 1 provider: {files_in_report_with_providers} ({percentage_hosted:.2f}% of manifest files with CIDs)." )
+        else:
+            click.echo("No files with CIDs found in the manifest to check.")
+
+        total_unique_file_providers = len(all_file_providers_peers)
+        click.echo(f"Total unique providers across checked files: {total_unique_file_providers}.")
+        
+        if provider_file_counts:
+            avg_files_per_provider = sum(provider_file_counts.values()) / len(provider_file_counts)
+            click.echo(f"Average files hosted per unique file provider: {avg_files_per_provider:.2f}.")
+        else:
+            click.echo("Average files hosted per unique file provider: N/A (no file providers found).")
+
+    if show_peer_ids:
+        click.echo("\n--- Verbose: Provider Peer IDs ---")
+        for cid_checked, peers in providers_by_cid.items():
+            description = target_cids_map.get(cid_checked, f"CID {cid_checked}")
+            if peers:
+                click.echo(f"Providers for {description}:")
+                for peer_id in sorted(list(peers)):
+                    click.echo(f"  - {peer_id}")
+            else:
+                click.echo(f"Providers for {description}: None found or error during lookup.")
+
+    click.echo("\nAvailability check complete.")
 
 # Ensure the main guard is present if this script is run directly
 if __name__ == '__main__':

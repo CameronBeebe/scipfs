@@ -1,7 +1,9 @@
 import ipfshttpclient
 import logging
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Set
+import json
+import subprocess # Import subprocess
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -13,8 +15,12 @@ class IPFSClient:
     def __init__(self, addr: str = "/ip4/127.0.0.1/tcp/5001"):
         """Initialize IPFS client with the given node address."""
         try:
-            self.client = ipfshttpclient.connect(addr)
-            logger.info("Connected to IPFS node at %s", addr)
+            self.client = ipfshttpclient.connect(addr, timeout=30)
+            self.client.id()
+            logger.info("Successfully connected to IPFS node at %s", addr)
+        except ipfshttpclient.exceptions.ConnectionError as e:
+            logger.error(f"Failed to connect to IPFS node at {addr}. Is the IPFS daemon running? {e}")
+            raise ConnectionError(f"Could not connect to IPFS node at {addr}. Please ensure the IPFS daemon is running.") from e
         except Exception as e:
             logger.error("Failed to connect to IPFS node: %s", e)
             raise ConnectionError(f"Could not connect to IPFS node at {addr}: {e}")
@@ -55,7 +61,6 @@ class IPFSClient:
         """Retrieve and parse JSON content from IPFS by CID."""
         try:
             content = self.client.cat(cid).decode("utf-8")
-            import json
             return json.loads(content)
         except Exception as e:
             logger.error("Failed to retrieve JSON for CID %s: %s", cid, e)
@@ -150,12 +155,102 @@ class IPFSClient:
     def get_pinned_cids(self) -> set[str]:
         """Retrieve a set of all CIDs currently pinned by the local IPFS node."""
         try:
-            pinned_items = self.client.pin.ls(type='recursive') # Get all recursively pinned items
-            # The response is like: {'Keys': {<cid>: {'Type': 'recursive'}, ...}}
+            pinned_items = self.client.pin.ls(type='recursive')
             cids = set(pinned_items.get('Keys', {}).keys())
             logger.info("Retrieved %d pinned CIDs from the local node.", len(cids))
             return cids
+        except ipfshttpclient.exceptions.ErrorResponse as e:
+            logger.error(f"IPFS Error retrieving pinned CIDs: {e}")
+            return set()
         except Exception as e:
-            logger.error("Failed to retrieve pinned CIDs: %s", e)
+            logger.error("Failed to retrieve pinned CIDs: %s", e, exc_info=True)
             # Return an empty set on error to allow dependant commands to function gracefully
             return set()
+
+    def find_providers(self, cid: str, timeout: int = 60) -> Set[str]:
+        """Find peers providing a given CID.
+
+        Attempts to use the client API first. If that fails due to specific known
+        API deprecation errors (e.g., on older daemons), it falls back to calling
+        the `ipfs routing findprovs` command via subprocess.
+        """
+        providers = set()
+        primary_method_failed_due_to_api = False
+
+        # --- Primary Method: Use ipfshttpclient API --- 
+        try:
+            logger.info(f"Attempting API call dht.findprovs for CID {cid} (timeout={timeout}s)...")
+            provs_stream = self.client.dht.findprovs(cid, timeout=timeout)
+            
+            for prov_info in provs_stream:
+                if isinstance(prov_info, dict) and prov_info.get('Type') == 4:
+                    responses = prov_info.get('Responses')
+                    if isinstance(responses, list):
+                        for peer_data in responses:
+                            if isinstance(peer_data, dict) and 'ID' in peer_data:
+                                providers.add(peer_data['ID'])
+            
+            if not providers:
+                 logger.info(f"API call: No providers found for CID {cid} within the timeout.")
+            else:
+                 logger.info(f"API call: Found {len(providers)} providers for CID {cid}.")
+            return providers # Success with primary method
+
+        except ipfshttpclient.exceptions.TimeoutError:
+             logger.warning(f"Timeout occurred after {timeout} seconds during API call dht.findprovs for CID {cid}.")
+             # Do not fall back on timeout, as the command line might also timeout
+        except ipfshttpclient.exceptions.ErrorResponse as e:
+             error_str = str(e).lower()
+             # Check for specific error messages indicating the API is deprecated/removed
+             if "use 'ipfs routing' instead" in error_str or "no command found" in error_str:
+                 logger.warning(f"API call dht.findprovs failed for CID {cid} (likely unsupported by daemon). Will attempt fallback using `ipfs routing findprovs` CLI command. Error: {e}")
+                 primary_method_failed_due_to_api = True # Signal that fallback should be tried
+             elif "routing: not found" in error_str:
+                 logger.warning(f"API call: Could not find providers for CID {cid} (likely not available on the network): {e}")
+                 # Content not found via API, unlikely CLI will find it either, don't fallback.
+             else:
+                 logger.error(f"IPFS error response during API call dht.findprovs for CID {cid}: {e}")
+                 # Unknown API error, might not be recoverable by CLI fallback.
+        except Exception as e:
+            logger.error(f"Unexpected error during API call dht.findprovs for CID {cid}: {e}", exc_info=True)
+            # Unexpected API error, might not be recoverable by CLI fallback.
+
+        # --- Fallback Method: Use `ipfs routing findprovs` CLI command --- 
+        if primary_method_failed_due_to_api:
+            logger.info(f"Attempting fallback using `ipfs routing findprovs {cid}` CLI command...")
+            try:
+                # Use a timeout for the subprocess as well, slightly less than the main timeout?
+                # Note: subprocess timeout is for the whole command execution.
+                cli_timeout = max(5, timeout - 5) # Give some buffer
+                result = subprocess.run(
+                    ["ipfs", "routing", "findprovs", cid],
+                    capture_output=True,
+                    text=True,
+                    check=False, # Don't raise exception on non-zero exit code immediately
+                    timeout=cli_timeout
+                )
+                
+                if result.returncode == 0:
+                    output_lines = result.stdout.strip().split('\n')
+                    for line in output_lines:
+                        peer_id = line.strip()
+                        if peer_id: # Basic validation: non-empty string
+                           # Could add more robust Peer ID validation if needed (e.g., starts with Qm or 12D)
+                           providers.add(peer_id)
+                    logger.info(f"CLI Fallback: Found {len(providers)} providers for CID {cid}.")
+                    return providers # Success with fallback
+                else:
+                    # Command failed
+                    stderr_output = result.stderr.strip()
+                    logger.error(f"CLI fallback command `ipfs routing findprovs {cid}` failed (exit code {result.returncode}). Stderr: {stderr_output}")
+            
+            except FileNotFoundError:
+                logger.error("CLI fallback failed: 'ipfs' command not found in PATH. Cannot execute `ipfs routing findprovs`.")
+            except subprocess.TimeoutExpired:
+                logger.error(f"CLI fallback command `ipfs routing findprovs {cid}` timed out after {cli_timeout} seconds.")
+            except Exception as e:
+                logger.error(f"Unexpected error during CLI fallback execution for CID {cid}: {e}", exc_info=True)
+
+        # If we reach here, both primary and (if attempted) fallback methods failed.
+        logger.warning(f"Could not determine providers for CID {cid} using API or CLI fallback.")
+        return set() # Return empty set indicating failure

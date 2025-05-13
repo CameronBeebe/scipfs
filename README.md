@@ -375,6 +375,43 @@ eval (env _SCIPFS_COMPLETE=fish_source scipfs)
 
 After adding the line, restart your shell or source the configuration file (e.g., `source ~/.bashrc`) for the changes to take effect. You should then be able to use tab completion for `scipfs` commands and arguments.
 
+### Checking Network Availability (`scipfs availability`)
+
+SciPFS provides a command to check the network availability of files within your libraries:
+
+```bash
+scipfs availability <library_name> [--file <file_name>] [--verbose] [--timeout <seconds>]
+```
+
+This command attempts to find peers (providers) on the IPFS network that are hosting the library's manifest and/or specific file CIDs.
+
+**Functionality:**
+
+*   **Default Mode:** Checks the manifest CID and all file CIDs in the specified library.
+*   `--file <file_name>`: Checks only the specified file within the library.
+*   `--verbose`: In addition to the summary, lists the Peer IDs of the providers found for each CID. (Note: For detailed operational logs from SciPFS itself, use the global `scipfs --verbose availability ...` flag).
+*   `--timeout <seconds>`: Sets the timeout for finding providers for *each* CID (default is 60 seconds).
+
+**Output:**
+
+The command provides a summary including:
+*   Number of providers found for the manifest.
+*   Total number of files in the manifest and how many were checked.
+*   Number and percentage of checked files that have at least one provider.
+*   Total unique providers found across all checked files.
+*   Average number of files hosted per unique provider.
+
+**Important Considerations for IPFS Daemon Versions:**
+
+*   **Compatibility:** The `scipfs availability` command relies on your IPFS daemon's ability to find content providers. SciPFS uses the `ipfshttpclient` library (currently version `0.8.0a2`) which is best compatible with IPFS daemon versions `0.5.0` to `<0.9.0`.
+*   **Primary Method (API):** SciPFS first attempts to find providers using a direct API call to your IPFS daemon (`dht.findprovs`). This is the most efficient method.
+*   **Fallback Method (CLI):** If your IPFS daemon is an older version (e.g., `0.4.x` or older like `0.34.1`) that no longer supports the specific API endpoint used by `ipfshttpclient`, SciPFS will automatically attempt a fallback. This fallback involves executing the `ipfs routing findprovs <CID>` command directly via your system's command line.
+    *   **Dependency:** This fallback requires the `ipfs` executable to be installed and accessible in your system's PATH.
+    *   **Performance:** The CLI fallback is generally **slower** than the direct API call.
+    *   **Reliability:** Relying on CLI execution can be less reliable than direct API interaction.
+*   **Recommendation:** For the best performance and reliability of the `availability` command, it is **highly recommended to use an IPFS daemon version that is directly compatible with `ipfshttpclient` (i.e., `0.5.0` - `0.8.x`)**. This avoids the need for the slower CLI fallback.
+*   **Troubleshooting:** If you see warnings like "API call dht.findprovs failed... Will attempt fallback..." and the command is slow, it indicates the fallback is being used. If the fallback also fails (e.g., with "'ipfs' command not found"), you will need to either update your IPFS daemon or ensure the `ipfs` CLI tool is correctly installed and in your PATH.
+
 ---
 
 ## Group Coordination (via IPNS)

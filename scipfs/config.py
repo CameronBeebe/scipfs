@@ -1,48 +1,87 @@
 import json
-from pathlib import Path
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-CONFIG_DIR = Path.home() / ".scipfs"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+class SciPFSConfig:
+    """Manages SciPFS configuration stored in a JSON file."""
 
-DEFAULT_CONFIG = {
-    "username": None
-}
+    def __init__(self, config_dir: Path):
+        """Initialize configuration manager.
 
-def load_config() -> dict:
-    """Loads the configuration from the config file."""
-    if not CONFIG_FILE.exists():
-        return DEFAULT_CONFIG.copy() # Return default if no config file
-    try:
-        with open(CONFIG_FILE, "r") as f:
-            config = json.load(f)
-            # Ensure default keys exist
-            full_config = DEFAULT_CONFIG.copy()
-            full_config.update(config)
-            return full_config
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error(f"Error loading config file {CONFIG_FILE}: {e}. Returning default config.")
-        return DEFAULT_CONFIG.copy()
+        Args:
+            config_dir: The directory where configuration files are stored (~/.scipfs).
+        """
+        self.config_dir = config_dir
+        # Ensure the directory exists before trying to access files within it
+        self.config_dir.mkdir(parents=True, exist_ok=True) 
+        self.config_file_path = self.config_dir / "config.json"
+        self.config_data: Dict = {}
+        self._load_config()
 
-def save_config(config: dict) -> None:
-    """Saves the configuration dictionary to the config file."""
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True) # Ensure directory exists
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=2)
-    except OSError as e:
-        logger.error(f"Error saving config file {CONFIG_FILE}: {e}")
-        raise # Re-raise the exception for the CLI to handle
+    def _load_config(self) -> None:
+        """Load configuration from the JSON file.
 
-def get_username() -> Optional[str]:
-    """Convenience function to get the configured username."""
-    return load_config().get("username")
+        Handles file not found and JSON decoding errors.
+        """
+        if self.config_file_path.exists():
+            try:
+                with open(self.config_file_path, "r") as f:
+                    self.config_data = json.load(f)
+                if not isinstance(self.config_data, dict):
+                     logger.warning(f"Config file {self.config_file_path} does not contain a valid JSON object. Resetting.")
+                     self.config_data = {}
+            except json.JSONDecodeError:
+                logger.error(f"Error decoding JSON from config file {self.config_file_path}. File might be corrupted. Resetting config.", exc_info=True)
+                self.config_data = {}
+            except Exception as e:
+                 logger.error(f"Failed to load config file {self.config_file_path}: {e}", exc_info=True)
+                 self.config_data = {} # Reset on other load errors
+        else:
+            logger.debug(f"Config file {self.config_file_path} not found. Initializing empty config.")
+            self.config_data = {}
 
-def set_username(username: str) -> None:
-    """Sets the username in the configuration."""
-    config = load_config()
-    config["username"] = username
-    save_config(config) 
+    def _save_config(self) -> None:
+        """Save the current configuration data to the JSON file."""
+        try:
+            # Ensure directory exists again just in case
+            self.config_dir.mkdir(parents=True, exist_ok=True) 
+            with open(self.config_file_path, "w") as f:
+                json.dump(self.config_data, f, indent=4)
+            logger.debug(f"Saved configuration to {self.config_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save config file {self.config_file_path}: {e}", exc_info=True)
+
+    def get_username(self) -> Optional[str]:
+        """Get the configured username.
+
+        Returns:
+            The username string or None if not set.
+        """
+        return self.config_data.get("username")
+
+    def set_username(self, username: str) -> None:
+        """Set the username in the configuration and save it.
+
+        Args:
+            username: The username string to set.
+        """
+        if not isinstance(username, str) or not username:
+            raise ValueError("Username must be a non-empty string.")
+        self.config_data["username"] = username
+        self._save_config()
+
+    # --- Future methods for other config settings can be added below ---
+    # Example:
+    # def get_reputable_peers(self) -> List[Dict]:
+    #     return self.config_data.get("reputable_peers", [])
+    #
+    # def add_reputable_peer(self, peer_id: str, alias: str) -> None:
+    #     peers = self.get_reputable_peers()
+    #     # Avoid duplicates
+    #     if not any(p.get('id') == peer_id for p in peers):
+    #         peers.append({"id": peer_id, "alias": alias})
+    #         self.config_data["reputable_peers"] = peers
+    #         self._save_config() 
