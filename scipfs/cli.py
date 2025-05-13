@@ -125,6 +125,7 @@ def init():
 
 @cli.command()
 @click.argument("name")
+@click.pass_context # Pass context to access verbose flag if needed inside commands
 def create(ctx, name: str):
     """Create a new library and its IPNS entry.
 
@@ -157,6 +158,9 @@ def create(ctx, name: str):
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)
         click.echo(f"Hint: A library or IPNS key with the name '{name}' might already exist. Check local manifests or 'ipfs key list'.", err=True)
+        sys.exit(1)
+    except ConnectionError as e:
+        click.echo(f"Error connecting to IPFS: {e}", err=True)
         sys.exit(1)
     except Exception as e:
         click.echo(f"An unexpected error occurred during 'create': {e}", err=True)
