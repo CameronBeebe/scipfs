@@ -70,6 +70,20 @@ To use SciPFS, you need to have Python 3.8+ installed, along with a running IPFS
 
 3. **Ensure IPFS is installed and running** (see [Setting Up IPFS](#setting-up-ipfs)).
 
+**Note on Go Helper Compatibility:**
+
+The SciPFS Go helper binary (`scipfs_go_helper`) is required for some operations (like `add_file` and `pin`).
+This binary is **not** included directly in the repository. You will need to build it from source after cloning the project.
+
+- **Operating System & Architecture:** The Go toolchain supports cross-compilation, but the provided `build_go_wrapper.sh` script is primarily set up for building on the current system. The Go source `scipfs_go_wrapper.go` should be compatible with standard Go environments (typically macOS, Linux, Windows on common architectures like amd64, arm64).
+- **Build Instructions:** Run the `build_go_wrapper.sh` script located in the project root:
+  ```bash
+  ./build_go_wrapper.sh
+  ```
+  This will compile `scipfs_go_wrapper.go` and produce the `scipfs_go_helper` executable in the project root.
+
+Support for distributing pre-compiled binaries for various platforms or more integrated build steps during package installation is planned for future releases.
+
 ---
 
 ## Setting Up IPFS
@@ -121,6 +135,32 @@ SciPFS uses the `ipfshttpclient` library to communicate with your IPFS daemon. T
 -   For example, if you are running an older IPFS daemon (e.g., `0.34.1`), you will likely see this warning.
 -   While basic functionality might still work (as demonstrated by the project's tests with older daemons), using a mismatched version can lead to unexpected behavior or errors with certain features.
 -   **Recommendation**: For best results and stability, try to use an IPFS daemon version that is within the supported range of the `ipfshttpclient`. You can check the `ipfshttpclient` documentation for its currently supported `go-ipfs` versions. Alternatively, future versions of SciPFS may update this dependency or offer guidance for specific daemon versions.
+
+### Client Implementation Status
+
+SciPFS is currently in a transition period, using both the `ipfshttpclient` library and a custom Go wrapper in parallel:
+
+- **Methods using Go wrapper**:
+  - `add_file`: Adding files to IPFS
+  - `pin`: Pinning CIDs
+  - `get_daemon_info`: Getting IPFS daemon information
+
+- **Methods using ipfshttpclient**:
+  - `get_file`: Downloading files
+  - `get_json`: Retrieving JSON content
+  - `add_json`: Adding JSON data
+  - `generate_ipns_key`: Generating IPNS keys
+  - `list_ipns_keys`: Listing IPNS keys
+  - `check_key_exists`: Checking key existence
+  - `publish_to_ipns`: Publishing to IPNS
+  - `resolve_ipns_name`: Resolving IPNS names
+  - `get_pinned_cids`: Getting pinned CIDs
+  - `find_providers`: Finding content providers
+
+**Long-term Plan**: All methods will be migrated to use the Go wrapper exclusively. This transition allows for:
+1. Maintaining full functionality during the migration
+2. Thorough testing of each method's Go wrapper implementation
+3. Gradual deprecation of the `ipfshttpclient` dependency
 
 ---
 
@@ -312,247 +352,4 @@ scipfs update my-shared-docs
 
 To view details about a local library, including its manifest CID and IPNS name (if available):
 
-```bash
-scipfs info <library_name>
 ```
-
-Example:
-```bash
-scipfs info my-shared-docs
-```
-
-### Listing Local Libraries
-
-To see all the SciPFS libraries you have created or joined that have local manifests:
-
-```bash
-scipfs list-local
-```
-
-### Listing Pinned Library Files
-
-To see which files from your local SciPFS libraries are currently pinned on your IPFS node:
-
-```bash
-scipfs list-pinned
-```
-
-This command:
-1. Retrieves all CIDs pinned on your local IPFS node.
-2. Checks these CIDs against the files listed in your local SciPFS library manifests.
-3. Displays a list of library files that are pinned, showing their library, name, and CID.
-4. It will also show any other CIDs that are pinned but don't correspond to known files in your SciPFS libraries (these might be manifest CIDs themselves, or other data you've pinned manually).
-
-This is useful for understanding what SciPFS-managed content you are actively helping to keep available on the IPFS network.
-
-### Enabling Shell Autocompletion (Recommended)
-
-SciPFS supports command autocompletion for shells like Bash and Zsh, which can greatly improve usability (e.g., by allowing you to tab-complete library names or file names within libraries for the `get` command).
-
-To enable it, you need to add a line to your shell's configuration file.
-
-**For Bash:**
-Add the following to your `~/.bashrc` or `~/.bash_profile`:
-```bash
-eval "$(_SCIPFS_COMPLETE=bash_source scipfs)"
-```
-
-**For Zsh:**
-Add the following to your `~/.zshrc`. Make sure these lines appear *after* any lines that initialize your Zsh framework (like Oh My Zsh, Prezto, etc.), if you use one, but *before* you try to use the completion:
-
-```bash
-autoload -U compinit && compinit # Load Zsh's completion system
-eval "$(_SCIPFS_COMPLETE=zsh_source scipfs)"
-```
-
-If you're not using a Zsh framework, placing these lines towards the end of your `~/.zshrc` is generally safe.
-
-**For Fish:**
-Add the following to your `~/.config/fish/completions/scipfs.fish` (create the file if it doesn't exist):
-```fish
-eval (env _SCIPFS_COMPLETE=fish_source scipfs)
-```
-
-After adding the line, restart your shell or source the configuration file (e.g., `source ~/.bashrc`) for the changes to take effect. You should then be able to use tab completion for `scipfs` commands and arguments.
-
-### Checking Network Availability (`scipfs availability`)
-
-SciPFS provides a command to check the network availability of files within your libraries:
-
-```bash
-scipfs availability <library_name> [--file <file_name>] [--verbose] [--timeout <seconds>]
-```
-
-This command attempts to find peers (providers) on the IPFS network that are hosting the library's manifest and/or specific file CIDs.
-
-**Functionality:**
-
-*   **Default Mode:** Checks the manifest CID and all file CIDs in the specified library.
-*   `--file <file_name>`: Checks only the specified file within the library.
-*   `--verbose`: In addition to the summary, lists the Peer IDs of the providers found for each CID. (Note: For detailed operational logs from SciPFS itself, use the global `scipfs --verbose availability ...` flag).
-*   `--timeout <seconds>`: Sets the timeout for finding providers for *each* CID (default is 60 seconds).
-
-**Output:**
-
-The command provides a summary including:
-*   Number of providers found for the manifest.
-*   Total number of files in the manifest and how many were checked.
-*   Number and percentage of checked files that have at least one provider.
-*   Total unique providers found across all checked files.
-*   Average number of files hosted per unique provider.
-
-**Important Considerations for IPFS Daemon Versions:**
-
-*   **Compatibility:** The `scipfs availability` command relies on your IPFS daemon's ability to find content providers. SciPFS uses the `ipfshttpclient` library (currently version `0.8.0a2`) which is best compatible with IPFS daemon versions `0.5.0` to `<0.9.0`.
-*   **Primary Method (API):** SciPFS first attempts to find providers using a direct API call to your IPFS daemon (`dht.findprovs`). This is the most efficient method.
-*   **Fallback Method (CLI):** If your IPFS daemon is an older version (e.g., `0.4.x` or older like `0.34.1`) that no longer supports the specific API endpoint used by `ipfshttpclient`, SciPFS will automatically attempt a fallback. This fallback involves executing the `ipfs routing findprovs <CID>` command directly via your system's command line.
-    *   **Dependency:** This fallback requires the `ipfs` executable to be installed and accessible in your system's PATH.
-    *   **Performance:** The CLI fallback is generally **slower** than the direct API call.
-    *   **Reliability:** Relying on CLI execution can be less reliable than direct API interaction.
-*   **Recommendation:** For the best performance and reliability of the `availability` command, it is **highly recommended to use an IPFS daemon version that is directly compatible with `ipfshttpclient` (i.e., `0.5.0` - `0.8.x`)**. This avoids the need for the slower CLI fallback.
-*   **Troubleshooting:** If you see warnings like "API call dht.findprovs failed... Will attempt fallback..." and the command is slow, it indicates the fallback is being used. If the fallback also fails (e.g., with "'ipfs' command not found"), you will need to either update your IPFS daemon or ensure the `ipfs` CLI tool is correctly installed and in your PATH.
-
----
-
-## Group Coordination (via IPNS)
-
-SciPFS uses IPNS to simplify sharing and updating libraries.
-
-### Sharing the Library (via IPNS Name)
-
-1.  **Creator**: When you create a library using `scipfs create <library_name>`, the command outputs an **IPNS name** (e.g., `/ipns/k51q...`).
-2.  **Share this IPNS name** with your group members. This is the stable address for your library.
-3.  **Members**: Use `scipfs join <ipns_name>` (using the IPNS name you provided) to get a local copy of the library manifest and start interacting with the library.
-
-### How Library Updates Work
-
--   **For the Library Owner (Creator)**:
-    -   When you add files using `scipfs add <library_name> <file_path>`, SciPFS automatically updates the local manifest, uploads the new manifest to IPFS (getting a new CID), and then **republishes this new manifest CID to the library's original IPNS name**.
-    -   Your IPFS daemon must be running and connected to the network to publish IPNS updates.
-
--   **For Library Members (Non-Owners)**:
-    -   When you add files using `scipfs add <library_name> <file_path>`, your **local manifest is updated**, and a new manifest CID is generated and shown. This change is only on your machine.
-    -   To make these additions visible to everyone via the library's main IPNS name, the library owner would typically need to add those same files (or obtain your new manifest CID and manually publish it, though `scipfs` doesn't automate this for non-owners). For most collaborative workflows, it's common for one person (the owner/maintainer) to be responsible for publishing updates to the primary IPNS name.
-
--   **Getting Updates (All Members, Including Owner on Different Machines)**:
-    -   Anyone who has joined the library can get the latest changes by running:
-        ```bash
-        scipfs update <library_name>
-        ```
-    -   This command fetches the latest manifest CID published to the library's IPNS name and updates the local manifest file.
-    -   **Note**: IPNS propagation across the IPFS network can take some time (minutes to hours in some cases). If a library owner publishes an update, other members might not see it immediately when they run `scipfs update`.
-
-### Pinning CIDs for Availability
-
-IPFS keeps data available as long as at least one node on the network has it and is willing to serve it. "Pinning" a Content ID (CID) on your local IPFS node tells your node to store a persistent copy of that data and make it available.
-
-- **Automatic Pinning by SciPFS**:
-    - When you `scipfs create` a library, the initial manifest is pinned.
-    - When you `scipfs add` a file, both the file itself and the updated library manifest are pinned on your node.
-    - When you `scipfs join` or `scipfs update` a library, the downloaded library manifest is pinned on your node.
-    - If you use the `--pin` option with `scipfs get`, the downloaded file(s) will be pinned on your node.
-
-- **Why Pin?**
-    - **Your own access**: Ensures files you care about are always on your local node, even if they become rare on the network.
-    - **Helping the community**: If multiple members of a library pin its files (and its manifest CIDs), the library becomes more resilient and accessible for everyone. Each node that pins content acts as another host for that data.
-
-- **Manual Pinning with IPFS**: 
-    For any CID (be it a file or a manifest), you can always use the native IPFS command to pin it:
-    ```bash
-    ipfs pin add <CID>
-    ```
-    You can find file CIDs using `scipfs list <library_name>`.
-
-- **Checking Pinned Items**: 
-    To see all CIDs your local IPFS node has pinned, use:
-    ```bash
-    ipfs pin ls
-    ```
-
----
-
-## Running Tests
-
-The `scipfs` repository includes a basic integration test script. To run the tests:
-
-1.  **Prerequisites**:
-    *   Ensure your IPFS daemon is running.
-    *   Ensure `scipfs` is installed and available in your PATH (e.g., if you installed it from source using `pip install .` in the project directory).
-2.  **Execute the test script**:
-    Navigate to the root directory of the `scipfs` project in your terminal and run:
-    ```bash
-    bash tests/run_basic_tests.sh
-    ```
-    The script will perform various operations like creating libraries, adding files, and getting files, and then clean up after itself.
-
----
-
-## Debugging Common Issues
-
-### Can't Connect to IPFS Node
-
-**Symptoms**:
-- Errors like "Failed to connect to IPFS node" or "Could not connect to IPFS node at /ip4/127.0.0.1/tcp/5001".
-
-**Solutions**:
-1. Ensure the daemon is running:
-   ```bash
-   ipfs daemon
-   ```
-2. Verify the node address. SciPFS uses `/ip4/127.0.0.1/tcp/5001` by default. Adjust if needed (future feature).
-
-### Files Not Found in Library
-
-**Symptoms**:
-- Missing files when using `scipfs list <library_name>`.
-- "File not found in library" error when using `scipfs get <library_name> <file_name>`.
-
-**Solutions**:
-1.  Ensure your local manifest is up-to-date by running:
-    ```bash
-    scipfs update <library_name>
-    ```
-2.  Allow some time for IPNS records to propagate if the library was just updated by the owner.
-3.  Verify the file is indeed in the manifest after updating:
-    ```bash
-    scipfs list <library_name>
-    ```
-4.  If you are the library owner, ensure you successfully added the file and that the `scipfs add` command completed without errors.
-
-### Manifest Not Updating / Changes Not Visible
-
-**Symptoms**:
-- After the library owner adds files, other members (or the owner on a different machine) run `scipfs update <library_name>` but still see the old version of the library.
-- `scipfs info <library_name>` shows an old manifest CID.
-
-**Solutions**:
-1.  **For Library Owner**:
-    *   Ensure the `scipfs add` command completed successfully and a new manifest CID was generated and published. Check for any error messages.
-    *   Your IPFS daemon must be running and connected to the network to publish IPNS updates.
-2.  **For All Members**:
-    *   Run `scipfs update <library_name>` again after some time. IPNS propagation is not instantaneous and can take minutes or longer.
-    *   Verify the library's IPNS name being used is correct.
-3.  Check your IPFS daemon's logs for any issues related to IPNS resolution or publishing.
-
----
-
-## FAQ
-
-**Q: Do all members need their own IPFS daemon?**  
-A: Yes, each needs a local daemon to interact with IPFS.
-
-**Q: How do I keep files available if members are offline?**  
-A: Multiple members should pin the same CIDs for higher availability.
-
-**Q: Can I use a remote IPFS node?**  
-A: Currently, SciPFS supports only local nodes. Remote support may come later.
-
----
-
-## Contributing
-
-Details on how to contribute to SciPFS will be added here in the future. For now, please use the GitHub issue tracker for bug reports or feature suggestions.
-
----
-
-This documentation provides clear instructions for setting up IPFS, managing CIDs, coordinating with a group, and debugging common issues. Happy sharing!

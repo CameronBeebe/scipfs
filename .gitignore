@@ -78,3 +78,7 @@ scipfs_test_downloads_*/
 
 # Notebook checkpoints
 .ipynb_checkpoints 
+
+# Go build artifacts
+scipfs_go_helper
+scipfs_go_wrapper 

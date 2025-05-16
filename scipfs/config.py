@@ -1,7 +1,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,27 @@ class SciPFSConfig:
             raise ValueError("Username must be a non-empty string.")
         self.config_data["username"] = username
         self._save_config()
+
+    def get_api_addr_for_client(self) -> str:
+        """Get the configured IPFS API multiaddress.
+
+        Returns:
+            The IPFS API multiaddress string, or a default if not set.
+        """
+        return self.config_data.get("ipfs_api_addr", "/ip4/127.0.0.1/tcp/5001")
+
+    def set_api_addr(self, api_addr: str) -> None:
+        """Set the IPFS API multiaddress in the configuration and save it.
+
+        Args:
+            api_addr: The IPFS API multiaddress string to set (e.g., "/ip4/127.0.0.1/tcp/5001").
+        """
+        # Basic validation could be added here if desired (e.g., check if it starts with /ip4 or /dns)
+        if not isinstance(api_addr, str) or not api_addr:
+            raise ValueError("IPFS API address must be a non-empty string.")
+        self.config_data["ipfs_api_addr"] = api_addr
+        self._save_config()
+        logger.info(f"IPFS API address set to: {api_addr}")
 
     # --- Future methods for other config settings can be added below ---
     # Example:
