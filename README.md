@@ -127,40 +127,19 @@ ipfs daemon
 
 **Note**: If you encounter issues, ensure the daemon is running and no other processes are using the same ports.
 
-### IPFS Version Compatibility
+### IPFS Version Compatibility and Go Helper
 
-SciPFS uses the `ipfshttpclient` library to communicate with your IPFS daemon. This library typically supports a specific range of `go-ipfs` (the IPFS daemon) versions.
+SciPFS now exclusively uses a custom Go program (`scipfs_go_helper`) to communicate with your IPFS daemon. This approach replaces the previous Python-based `ipfshttpclient` library.
 
--   **You might see a `VersionMismatch` warning** when `scipfs` commands are run if your IPFS daemon version is outside the range officially supported by the `ipfshttpclient` version bundled with SciPFS (currently `ipfshttpclient==0.8.0a2`, which ideally works with `go-ipfs` versions `0.5.0` to `<0.9.0`).
--   For example, if you are running an older IPFS daemon (e.g., `0.34.1`), you will likely see this warning.
--   While basic functionality might still work (as demonstrated by the project's tests with older daemons), using a mismatched version can lead to unexpected behavior or errors with certain features.
--   **Recommendation**: For best results and stability, try to use an IPFS daemon version that is within the supported range of the `ipfshttpclient`. You can check the `ipfshttpclient` documentation for its currently supported `go-ipfs` versions. Alternatively, future versions of SciPFS may update this dependency or offer guidance for specific daemon versions.
+- **Go Helper (`scipfs_go_helper`)**: This executable is crucial for all IPFS operations within SciPFS. You must build it from the provided Go source code (`scipfs_go_wrapper.go`) using the `./build_go_wrapper.sh` script after cloning the repository. Ensure this helper is in your PATH or the current working directory when running `scipfs`.
+- **Kubo (IPFS Daemon) Compatibility**: The `scipfs_go_helper` interacts with your IPFS daemon (typically Kubo, formerly go-ipfs) via its HTTP API. For best results, ensure your Kubo daemon is up-to-date and running correctly. While specific version incompatibilities are less of a direct concern for SciPFS itself (as it now depends on the Go helper), the Go helper relies on standard IPFS API interactions. Significant breakage in the IPFS API by very old or experimental Kubo versions could still pose issues.
+- **Recommendation**: Keep your Kubo daemon updated to a recent stable release. If you encounter issues, verify that `scipfs_go_helper` is built correctly and that your IPFS daemon is operational and its API (`/ip4/127.0.0.1/tcp/5001` by default) is accessible.
 
 ### Client Implementation Status
 
-SciPFS is currently in a transition period, using both the `ipfshttpclient` library and a custom Go wrapper in parallel:
+**Migration Complete**: SciPFS has fully transitioned to using the `scipfs_go_helper` for all IPFS interactions. This includes operations such as adding files, pinning content, managing IPNS keys, publishing, resolving, and querying daemon information. The direct dependency on the Python `ipfshttpclient` library has been removed.
 
-- **Methods using Go wrapper**:
-  - `add_file`: Adding files to IPFS
-  - `pin`: Pinning CIDs
-  - `get_daemon_info`: Getting IPFS daemon information
-
-- **Methods using ipfshttpclient**:
-  - `get_file`: Downloading files
-  - `get_json`: Retrieving JSON content
-  - `add_json`: Adding JSON data
-  - `generate_ipns_key`: Generating IPNS keys
-  - `list_ipns_keys`: Listing IPNS keys
-  - `check_key_exists`: Checking key existence
-  - `publish_to_ipns`: Publishing to IPNS
-  - `resolve_ipns_name`: Resolving IPNS names
-  - `get_pinned_cids`: Getting pinned CIDs
-  - `find_providers`: Finding content providers
-
-**Long-term Plan**: All methods will be migrated to use the Go wrapper exclusively. This transition allows for:
-1. Maintaining full functionality during the migration
-2. Thorough testing of each method's Go wrapper implementation
-3. Gradual deprecation of the `ipfshttpclient` dependency
+This unified approach aims to provide more consistent behavior and easier maintenance for IPFS communications.
 
 ---
 
@@ -352,4 +331,133 @@ scipfs update my-shared-docs
 
 To view details about a local library, including its manifest CID and IPNS name (if available):
 
+```bash
+scipfs info <library_name>
 ```
+
+- Displays details about the library, including its manifest CID and IPNS name.
+
+### Listing Local Libraries
+
+To list all local libraries:
+
+```bash
+scipfs list --local
+```
+
+- Displays names and IPNS names of all local libraries.
+
+### Listing Pinned Library Files
+
+To list all files in all pinned libraries:
+
+```bash
+scipfs list --pinned
+```
+
+- Displays names, CIDs, and sizes of all files in all pinned libraries.
+
+### Enabling Shell Autocompletion (Recommended)
+
+To enable shell autocompletion for SciPFS commands:
+
+```bash
+scipfs config set autocompletion true
+```
+
+- This will enable autocompletion for SciPFS commands in your shell.
+
+---
+
+## Group Coordination (via IPNS)
+
+### Sharing the Library (via IPNS Name)
+
+To share a library with others, you need to publish its IPNS name. This allows others to join and get updates to the library.
+
+```bash
+scipfs publish <library_name>
+```
+- `<library_name>`: The name of the library to publish.
+- This command:
+    1. Generates a new IPNS key pair for the library.
+    2. Publishes the library's manifest CID to the new IPNS name.
+- The command will output the new IPNS name. **The IPNS name is what you share with others so they can join your library.**
+
+Example:
+```bash
+scipfs publish my-shared-docs
+# Output might include:
+# Successfully published library 'my-shared-docs' to IPNS name: /ipns/k51qkz0x...
+```
+
+### How Library Updates Work
+
+When the library owner adds files, the manifest changes (getting a new CID), and SciPFS automatically republishes this new manifest CID to the same IPNS name.
+
+### Pinning CIDs for Availability
+
+To pin a CID for availability, you can use the `scipfs pin` command:
+
+```bash
+scipfs pin <cid>
+```
+- `<cid>`: The CID to pin.
+- This command:
+    1. Pins the specified CID to your local IPFS node.
+    2. Ensures the CID is kept in your IPFS node's local storage.
+
+---
+
+## Running Tests
+
+To run the SciPFS test suite, use the following command:
+
+```bash
+pytest
+```
+
+This will run all the tests in the SciPFS project.
+
+---
+
+## Debugging Common Issues
+
+### Can't Connect to IPFS Node
+
+If you encounter issues connecting to your IPFS node, ensure:
+1. Your IPFS daemon is running.
+2. Your IPFS daemon is accessible via its default API port (5001).
+3. Your IPFS daemon is not being blocked by any firewall or network policies.
+
+### Files Not Found in Library
+
+If files are not found in a library, ensure:
+1. The file exists at the specified path.
+2. The file is not corrupted.
+3. The file is not being blocked by any network policies.
+
+### Manifest Not Updating / Changes Not Visible
+
+If changes are not visible in the library, ensure:
+1. The library owner has added the changes to the library.
+2. You have updated your local copy of the library.
+3. The library owner has published the changes to its IPNS name.
+
+---
+
+## FAQ
+
+### How do I get help if I encounter issues?
+
+If you encounter issues, please check the [GitHub Issues](https://github.com/CameronBeebe/scipfs/issues) page for similar issues or open a new issue.
+
+### How do I contribute to SciPFS?
+
+If you are interested in contributing to SciPFS, please see the [Contributing](https://github.com/CameronBeebe/scipfs/blob/main/CONTRIBUTING.md) page for more information.
+
+---
+
+## Contributing
+
+If you are interested in contributing to SciPFS, please see the [Contributing](https://github.com/CameronBeebe/scipfs/blob/main/CONTRIBUTING.md) page for more information.

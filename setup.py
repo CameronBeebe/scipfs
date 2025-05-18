@@ -5,8 +5,9 @@ setup(
     version="0.1.0",
     packages=find_packages(),
     install_requires=[
-        "ipfshttpclient==0.8.0a2",  # IPFS client library
-        "click==8.1.7",             # CLI framework
+        "click>=8.0",
+        "requests>=2.20",
+        "importlib-metadata>=1.0; python_version < '3.8'", # For entry points
     ],
     entry_points={
         "console_scripts": [

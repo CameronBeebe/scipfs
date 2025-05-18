@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"os/exec"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/ipfs/boxo/path" // This is the correct import for the path type returned by kubo client
@@ -233,6 +238,524 @@ func main() {
 			return
 		}
 		printJSONResponse(true, "", map[string]string{"cid": cidValue.String()})
+
+	case "get_cid_to_file":
+		getCidToFileCmd := flag.NewFlagSet("get_cid_to_file", flag.ExitOnError)
+		cidStr := getCidToFileCmd.String("cid", "", "CID of the content to get")
+		outputPath := getCidToFileCmd.String("output", "", "Path to save the output file")
+
+		err := getCidToFileCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'get_cid_to_file' subcommand: %s", err.Error()), nil)
+			return
+		}
+
+		if *cidStr == "" {
+			printJSONResponse(false, "Argument --cid <cid_string> is required", nil)
+			return
+		}
+		if *outputPath == "" {
+			printJSONResponse(false, "Argument --output <output_path> is required", nil)
+			return
+		}
+
+		// Validate CID
+		_, err = cid.Decode(*cidStr)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Invalid CID format for '%s': %s", *cidStr, err.Error()), nil)
+			return
+		}
+		
+		// Create/truncate the output file
+		outFile, err := os.Create(*outputPath)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error creating output file '%s': %s", *outputPath, err.Error()), nil)
+			return
+		}
+		defer outFile.Close()
+
+		// Prepare the 'ipfs cat' command
+		// We are not using the Kubo client library here for 'cat' to directly stream to file easily using os/exec.
+		// The Kubo client's 'Cat' method returns an io.ReadCloser, which could also be used with io.Copy.
+		// However, for this migration, using 'ipfs cat' via os/exec is closer to the other planned CLI wrappers.
+		cmd := exec.Command("ipfs", "cat", *cidStr)
+		cmd.Stdout = outFile // Redirect stdout of 'ipfs cat' to the output file
+		
+		// Capture stderr to report IPFS command errors
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs cat %s': %s", *cidStr, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			// Attempt to remove partially written file on error
+			os.Remove(*outputPath)
+			return
+		}
+		
+		printJSONResponse(true, "", map[string]string{"message": fmt.Sprintf("File downloaded successfully to %s", *outputPath), "cid": *cidStr, "output_path": *outputPath})
+
+	case "get_json_cid":
+		getJsonCidCmd := flag.NewFlagSet("get_json_cid", flag.ExitOnError)
+		cidStr := getJsonCidCmd.String("cid", "", "CID of the JSON content to get")
+
+		err := getJsonCidCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'get_json_cid' subcommand: %s", err.Error()), nil)
+			return
+		}
+
+		if *cidStr == "" {
+			printJSONResponse(false, "Argument --cid <cid_string> is required", nil)
+			return
+		}
+
+		// Validate CID
+		decodedCid, err := cid.Decode(*cidStr) // Store decoded CID for potential use with client library
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Invalid CID format for '%s': %s", *cidStr, err.Error()), nil)
+			return
+		}
+
+		// Use Kubo client library to get the content, as it handles various character encodings better than direct CLI piping for JSON.
+		// However, the original plan was to use CLI for all. Sticking to CLI for consistency during this phase.
+		// If issues arise with complex JSON, this can be switched to node.Cat().
+
+		cmd := exec.Command("ipfs", "cat", decodedCid.String()) // Use decodedCid.String() for canonical representation
+		
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs cat %s': %s", decodedCid.String(), err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		var jsonData interface{}
+		err = json.Unmarshal(stdout.Bytes(), &jsonData)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Failed to unmarshal JSON from CID %s: %s. Raw data: %s", decodedCid.String(), err.Error(), stdout.String()), nil)
+			return
+		}
+
+		printJSONResponse(true, "", jsonData) // Directly pass the parsed JSON data
+
+	case "add_json_data":
+		// No specific flags for this command as JSON data is expected via stdin
+		// However, we need to consume the subcommandArgs if any were passed, even if not used by this specific command.
+		addJsonDataCmd := flag.NewFlagSet("add_json_data", flag.ExitOnError)
+		err := addJsonDataCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'add_json_data' subcommand: %s", err.Error()), nil)
+			return
+		}
+
+		jsonDataBytes, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error reading JSON data from stdin: %s", err.Error()), nil)
+			return
+		}
+
+		if len(jsonDataBytes) == 0 {
+			printJSONResponse(false, "No JSON data received from stdin", nil)
+			return
+		}
+
+		// Validate if the input is actually JSON - optional but good practice
+		var tempJson interface{}
+		if err := json.Unmarshal(jsonDataBytes, &tempJson); err != nil {
+			printJSONResponse(false, fmt.Sprintf("Invalid JSON data received from stdin: %s", err.Error()), nil)
+			return
+		}
+
+		// Execute 'ipfs add -Q --cid-version 1 --pin=false' command
+		// -Q for quiet (only CID output)
+		// --cid-version 1 for CIDv1
+		// --pin=false as add_json typically doesn't pin by default, pinning is a separate step.
+		cmd := exec.Command("ipfs", "add", "-Q", "--cid-version", "1", "--pin=false")
+		cmd.Stdin = bytes.NewReader(jsonDataBytes) // Pipe jsonDataBytes to stdin of 'ipfs add'
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs add' for JSON data: %s", err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		cidStr := strings.TrimSpace(stdout.String())
+		// Validate the output CID from 'ipfs add -Q'
+		_, err = cid.Decode(cidStr)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("'ipfs add -Q' returned an invalid CID '%s': %s. Stderr: %s", cidStr, err.Error(), stderr.String()), nil)
+			return
+		}
+
+		printJSONResponse(true, "", map[string]string{"cid": cidStr})
+
+	case "gen_ipns_key":
+		genKeyCmd := flag.NewFlagSet("gen_ipns_key", flag.ExitOnError)
+		keyName := genKeyCmd.String("key-name", "", "Name for the new IPNS key")
+		keyType := genKeyCmd.String("key-type", "rsa", "Type of key to generate (e.g., rsa, ed25519)")
+		// keySize := genKeyCmd.Int("key-size", 2048, "Size of the key in bits (for RSA)") // CLI doesn't take size for rsa, uses default
+
+		err := genKeyCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'gen_ipns_key' subcommand: %s", err.Error()), nil)
+			return
+		}
+
+		if *keyName == "" {
+			printJSONResponse(false, "Argument --key-name is required", nil)
+			return
+		}
+
+		// Command: ipfs key gen <key_name> --type <key_type> --ipns-base base36
+		// The --ipns-base base36 ensures k51q... style keys if the key type supports it (like ed25519).
+		// For RSA, the ID is typically the hash of the public key, represented as a PeerID (Qm...). IPNS name will be derived from this.
+		// The `ipfs key gen` command outputs the PeerID (which is the key's ID) and then the key name.
+		// Example for ed25519: k51qkzoyv89qq9n1x9qsps7qjd5pqph9pv61mgfbk95s6c1gy1xqqb69k mykey
+		// Example for rsa: QmabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ12345 myrsakey (PeerID format)
+		
+		cmdArgs := []string{"key", "gen", *keyName, "--type", *keyType}
+		// if *keyType == "rsa" { // No explicit size flag for CLI, defaults to 2048 for RSA
+		// 	 cmdArgs = append(cmdArgs, "--size", strconv.Itoa(*keySize)) // Not for CLI
+		// }
+
+		cmd := exec.Command("ipfs", cmdArgs...)
+		
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs key gen %s': %s", *keyName, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		// Output is typically: <key_id_peer_id_format> <key_name>
+		// e.g. QmP2V4N2nJgZ7YxvN7sN9C8LqQZ1Z1Z1Z1Z1Z1Z1Z1Z1Z1Z myrsakey
+		// or   k51qkzoyv89qq9n1x9qsps7qjd5pqph9pv61mgfbk95s6c1gy1xqqb69k myedkey
+		outputParts := strings.Fields(strings.TrimSpace(stdout.String()))
+		if len(outputParts) < 1 { // Should be at least 1 (the ID), name might be omitted if it's `self` or complex names
+			printJSONResponse(false, fmt.Sprintf("'ipfs key gen' produced unexpected output: %s. Stderr: %s", stdout.String(), stderr.String()), nil)
+			return
+		}
+
+		keyId := outputParts[0]
+		// Key name from output might be different from input if input was invalid/transformed by ipfs
+		// For simplicity, we return the input keyName as Name, and the output ID as Id.
+		// The ipfshttpclient also returns the input name as 'Name'.
+
+		printJSONResponse(true, "", map[string]string{"Name": *keyName, "Id": keyId})
+
+	case "list_ipns_keys_cmd":
+		listKeysCmd := flag.NewFlagSet("list_ipns_keys_cmd", flag.ExitOnError)
+		// No specific flags for list_ipns_keys_cmd
+		err := listKeysCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'list_ipns_keys_cmd': %s", err.Error()), nil)
+			return
+		}
+
+		// Command: ipfs key list -l
+		// The -l flag gives <key_id> <key_name> format.
+		// --ipns-base base36 might be useful if we want to ensure k51... IDs, but `ipfs key list -l` gives PeerIDs.
+		// The http client returned PeerIDs for `Id`, so `ipfs key list -l` is consistent.
+		cmd := exec.Command("ipfs", "key", "list", "-l")
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs key list -l': %s", err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		outputLines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		var keysList []map[string]string
+
+		for _, line := range outputLines {
+			if line == "" { // Skip empty lines if any
+				continue
+			}
+			parts := strings.Fields(line)
+			if len(parts) >= 2 { // Expecting at least ID and Name
+				keyId := parts[0]
+				keyName := parts[1]
+				// If key name has spaces and was not quoted in output, `parts` might have more elements.
+				// For `ipfs key list -l` the name is usually the last field if no special characters.
+				// If key names can have spaces, `ipfs key list -l --enc=json` would be safer.
+				// Assuming simple key names for now, or that `ipfs key list -l` handles names correctly.
+				keysList = append(keysList, map[string]string{"Id": keyId, "Name": keyName})
+			} else if len(parts) == 1 { // Case for 'self' key which might only show ID
+				// This case is tricky; 'self' usually appears with its ID. If it's just one field, it's likely the ID.
+				// The httpclient output shows 'self' as a name. `ipfs key list -l` output for 'self': <id_of_self> self
+				// So, the len(parts) >= 2 should handle 'self' correctly.
+				// This block might be redundant if `ipfs key list -l` always gives ID and Name for `self`.
+				// For now, we stick to len(parts) >= 2, assuming consistent output from `ipfs key list -l`.
+			}
+		}
+		
+		// Check if `ipfs key list -l --enc=json` is available and preferred for robustness
+		// For now, proceed with text parsing.
+
+		printJSONResponse(true, "", keysList) // Return the list of key maps as data
+
+	case "publish_ipns":
+		publishCmd := flag.NewFlagSet("publish_ipns", flag.ExitOnError)
+		keyName := publishCmd.String("key-name", "", "Name of the IPNS key to publish to")
+		ipfsPath := publishCmd.String("path", "", "IPFS path to publish (e.g., /ipfs/CID)")
+		lifetime := publishCmd.String("lifetime", "24h", "Lifetime of the IPNS record (e.g., 24h, 30m)")
+
+		err := publishCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'publish_ipns': %s", err.Error()), nil)
+			return
+		}
+
+		if *keyName == "" {
+			printJSONResponse(false, "Argument --key-name is required", nil)
+			return
+		}
+		if *ipfsPath == "" {
+			printJSONResponse(false, "Argument --path (IPFS path) is required", nil)
+			return
+		}
+		if !strings.HasPrefix(*ipfsPath, "/ipfs/") && !strings.HasPrefix(*ipfsPath, "/ipns/") {
+			printJSONResponse(false, "Argument --path must start with /ipfs/ or /ipns/", nil)
+			return
+		}
+
+		// Command: ipfs name publish --key=<key_name> <path> --lifetime=<lifetime_str> --allow-offline=true
+		cmd := exec.Command("ipfs", "name", "publish", "--key="+*keyName, *ipfsPath, "--lifetime="+*lifetime, "--allow-offline=true")
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs name publish' for key '%s' to path '%s': %s", *keyName, *ipfsPath, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		// Output is: Published to <IPNS_ID_k51...>: /ipfs/<CID>
+		// Example: Published to k51qkzoyv89qq9n1x9qsps7qjd5pqph9pv61mgfbk95s6c1gy1xqqb69k: /ipfs/QmRAGS4fKaj1gS1j1tT8XzYmSLnL8xZTEbhK2mE2e7p2Tj
+		outputStr := strings.TrimSpace(stdout.String())
+		// Regex to capture IPNS ID and the path value
+		re := regexp.MustCompile(`^Published to ([^:]+): (.*)$`)
+		matches := re.FindStringSubmatch(outputStr)
+
+		if len(matches) != 3 {
+			printJSONResponse(false, fmt.Sprintf("'ipfs name publish' produced unexpected output: '%s'. Stderr: %s", outputStr, stderr.String()), nil)
+			return
+		}
+
+		publishedName := matches[1] // This is the IPNS ID (k51... or PeerID for RSA keys if not using base36)
+		publishedValue := matches[2] // This is the /ipfs/... path
+
+		printJSONResponse(true, "", map[string]string{"Name": publishedName, "Value": publishedValue})
+
+	case "resolve_ipns":
+		resolveCmd := flag.NewFlagSet("resolve_ipns", flag.ExitOnError)
+		ipnsName := resolveCmd.String("ipns-name", "", "IPNS name to resolve (e.g., k51... or /ipns/k51...)")
+		nocache := resolveCmd.Bool("nocache", true, "Resolve without using cached entries")
+		recursive := resolveCmd.Bool("recursive", true, "Resolve recursively until an IPFS path is found")
+
+		err := resolveCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'resolve_ipns': %s", err.Error()), nil)
+			return
+		}
+
+		if *ipnsName == "" {
+			printJSONResponse(false, "Argument --ipns-name is required", nil)
+			return
+		}
+
+		// Command: ipfs name resolve <ipns_name> --nocache=<bool> -r=<bool>
+		cmdArgs := []string{"name", "resolve", *ipnsName}
+		if *nocache {
+			cmdArgs = append(cmdArgs, "--nocache=true")
+		}
+		if *recursive {
+			cmdArgs = append(cmdArgs, "-r=true")
+		}
+		
+		cmd := exec.Command("ipfs", cmdArgs...)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs name resolve %s': %s", *ipnsName, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		// Output is the resolved path, e.g., /ipfs/Qm...
+		resolvedPath := strings.TrimSpace(stdout.String())
+
+		if !strings.HasPrefix(resolvedPath, "/ipfs/") && !strings.HasPrefix(resolvedPath, "/ipns/") {
+			// This might happen if resolution fails silently or returns something unexpected.
+			// The error from cmd.Run() should ideally catch most failures.
+			printJSONResponse(false, fmt.Sprintf("'ipfs name resolve' returned an unexpected path format: '%s'. Stderr: %s", resolvedPath, stderr.String()), nil)
+			return
+		}
+
+		printJSONResponse(true, "", map[string]string{"Path": resolvedPath})
+
+	case "list_pinned_cids":
+		listPinnedCmd := flag.NewFlagSet("list_pinned_cids", flag.ExitOnError)
+		pinType := listPinnedCmd.String("pin-type", "recursive", "Type of pins to list (recursive, direct, indirect, all)")
+
+		err := listPinnedCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'list_pinned_cids': %s", err.Error()), nil)
+			return
+		}
+
+		// Validate pinType - optional, but ipfs command will error anyway if invalid
+		validPinTypes := map[string]bool{"recursive": true, "direct": true, "indirect": true, "all": true}
+		if !validPinTypes[*pinType] {
+			printJSONResponse(false, fmt.Sprintf("Invalid --pin-type value: %s. Must be one of recursive, direct, indirect, all.", *pinType), nil)
+			return
+		}
+
+		// Command: ipfs pin ls --type=<pin_type> -q
+		cmd := exec.Command("ipfs", "pin", "ls", "--type="+*pinType, "-q")
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs pin ls --type %s -q': %s", *pinType, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		outputLines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		var cidsList []string
+		for _, line := range outputLines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" { // Ensure not adding empty strings if output has blank lines
+				// Validate if it's a CID - optional but good practice
+				_, err := cid.Decode(trimmedLine)
+				if err == nil {
+					cidsList = append(cidsList, trimmedLine)
+				} else {
+					// Log or handle non-CID lines if necessary. For now, just skip.
+					fmt.Fprintf(os.Stderr, "Warning: 'ipfs pin ls -q' output contained non-CID line: %s\n", trimmedLine)
+				}
+			}
+		}
+
+		printJSONResponse(true, "", map[string][]string{"cids": cidsList})
+
+	case "find_providers_cid":
+		findProvsCmd := flag.NewFlagSet("find_providers_cid", flag.ExitOnError)
+		cidStr := findProvsCmd.String("cid", "", "CID to find providers for")
+		numProviders := findProvsCmd.Int("num-providers", 20, "Number of providers to find")
+
+		err := findProvsCmd.Parse(subcommandArgs)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Error parsing flags for 'find_providers_cid': %s", err.Error()), nil)
+			return
+		}
+
+		if *cidStr == "" {
+			printJSONResponse(false, "Argument --cid is required", nil)
+			return
+		}
+		// Validate CID
+		_, err = cid.Decode(*cidStr)
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("Invalid CID format for '%s': %s", *cidStr, err.Error()), nil)
+			return
+		}
+
+		// Command: ipfs dht findprovs <cid> --num-providers=<val>
+		// The timeout for the dht walk itself is managed by the ipfs daemon.
+		// The timeout in the Python client will be for the execution of this Go helper process.
+		cmd := exec.Command("ipfs", "dht", "findprovs", fmt.Sprintf("--num-providers=%d", *numProviders), *cidStr)
+
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+
+		err = cmd.Run()
+		// `ipfs dht findprovs` can exit 0 even if no providers are found, printing nothing or just a newline.
+		// It exits non-zero for actual errors (e.g. routing error, CID format error before it even starts).
+		if err != nil {
+			errMsg := fmt.Sprintf("Error executing 'ipfs dht findprovs %s': %s", *cidStr, err.Error())
+			if stderr.Len() > 0 {
+				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
+			}
+			printJSONResponse(false, errMsg, nil)
+			return
+		}
+
+		outputLines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+		var providersList []string
+		for _, line := range outputLines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine != "" { // Add only non-empty lines
+				// Basic PeerID validation could be added here if desired (e.g. starts with Qm, 12D, k51)
+				providersList = append(providersList, trimmedLine)
+			}
+		}
+		// If no providers are found, providersList will be empty, which is a valid successful result.
+		printJSONResponse(true, "", map[string][]string{"providers": providersList})
 
 	default:
 		printJSONResponse(false, fmt.Sprintf("Unknown subcommand: '%s'. Args provided: %v", subcommand, subcommandArgs), nil)

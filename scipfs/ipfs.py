@@ -1,4 +1,3 @@
-import ipfshttpclient
 import logging
 from pathlib import Path
 from typing import Dict, Optional, List, Set
@@ -38,27 +37,8 @@ class FileNotFoundError(SciPFSException, FileNotFoundError):
 
 
 class IPFSClient:
-    """Manages interactions with an IPFS node.
-    
-    Note: Currently using both ipfshttpclient and Go wrapper in parallel.
-    Methods using ipfshttpclient:
-    - get_file
-    - get_json
-    - add_json
-    - generate_ipns_key
-    - list_ipns_keys
-    - check_key_exists
-    - publish_to_ipns
-    - resolve_ipns_name
-    - get_pinned_cids
-    - find_providers (with CLI fallback)
-    
-    Methods using Go wrapper:
-    - add_file
-    - pin
-    - get_daemon_info
-    
-    Long-term plan: Migrate all methods to use the Go wrapper exclusively.
+    """Manages interactions with an IPFS node using the scipfs_go_helper.
+    All IPFS operations are now routed through a local Go executable.
     """
     
     def __init__(self, addr: str = "/ip4/127.0.0.1/tcp/5001"):
@@ -68,8 +48,8 @@ class IPFSClient:
         self.go_wrapper_path: Optional[str] = None
         self.go_wrapper_version: Optional[str] = None
         self.go_wrapper_error: Optional[str] = None
-        self.client_id_dict: Optional[Dict] = None # Initialize attribute
-        self.client: Optional[ipfshttpclient.Client] = None # Initialize client attribute
+        self.client_id_dict: Optional[Dict] = None # To store Peer ID info from Go Wrapper
+        self.client: Optional[object] = None # ipfshttpclient.Client is no longer used.
 
         possible_paths = [
             f"./{self.go_wrapper_executable_name}",  # Check current directory
@@ -78,7 +58,6 @@ class IPFSClient:
 
         for path_attempt in possible_paths:
             try:
-                # Use a lightweight command like "version" to check
                 cmd = [path_attempt, "version"]
                 logger.debug(f"Attempting to find Go wrapper at: {' '.join(cmd)}")
                 result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5)
@@ -96,45 +75,44 @@ class IPFSClient:
                         logger.warning(
                             f"Go wrapper at '{path_attempt}' ran but gave unexpected version output: {result.stdout.strip()}"
                         )
-                        # Continue to next path if this one gave bad output but didn't error
-
                 except json.JSONDecodeError:
                     logger.warning(
                         f"Go wrapper at '{path_attempt}' ran but gave non-JSON output for version: {result.stdout.strip()}"
                     )
-                    # Continue to next path
-
             except FileNotFoundError:
                 logger.debug(f"Go wrapper not found at '{path_attempt}'.")
-                # Will try next path or set error if this was the last one
             except subprocess.CalledProcessError as e:
                 logger.warning(f"Go wrapper at '{path_attempt}' failed to run or returned error for version command. stderr: {e.stderr.strip()}")
-                # Will try next path or set error
             except subprocess.TimeoutExpired:
                 logger.warning(f"Timeout checking Go wrapper at '{path_attempt}' with version command.")
-                # Will try next path or set error
-            except Exception as e: # Catch any other unexpected errors during the check
+            except Exception as e: 
                 logger.error(f"Unexpected error checking Go wrapper at '{path_attempt}': {e}")
 
-
         if not self.go_wrapper_path:
-            self.go_wrapper_error = f"SciPFS Go Helper ('{self.go_wrapper_executable_name}') not found or non-functional. Checked: {', '.join(possible_paths)}"
+            self.go_wrapper_error = f"SciPFS Go Helper ('{self.go_wrapper_executable_name}') not found or non-functional. Checked: {possible_paths}. Please ensure it is built and in your PATH or current directory."
             logger.error(self.go_wrapper_error)
-            # No need to raise ConnectionError here, let consuming code check go_wrapper_path/version
+            # Raise connection error if wrapper is essential and not found, to prevent further ops.
+            raise ConnectionError(self.go_wrapper_error)
         
-        # Initialize ipfshttpclient connection
+        # Attempt to get and cache local Peer ID using the Go wrapper during initialization.
         try:
-            self.client = ipfshttpclient.connect(addr, timeout=90)
-            self.client_id_dict = self.client.id() # Assign here after successful connect and id call
-            logger.info("Successfully connected to IPFS node at %s. Peer ID: %s", addr, self.get_local_peer_id())
-        except ipfshttpclient.exceptions.ConnectionError as e:
-            logger.error(f"Failed to connect to IPFS node at {addr}. Is the IPFS daemon running? {e}")
-            # self.client remains None
-            raise ConnectionError(f"Could not connect to IPFS node at {addr}. Please ensure the IPFS daemon is running.") from e
-        except Exception as e:
-            logger.error("Failed to connect to IPFS node during general client init: %s", e)
-            # self.client remains None
-            raise ConnectionError(f"Could not connect to IPFS node at {addr} (unexpected error): {e}") from e
+            # get_local_peer_id uses _execute_go_wrapper_command_json which calls daemon_info
+            peer_id = self.get_local_peer_id()
+            if peer_id:
+                logger.info(f"Successfully connected to IPFS node via Go wrapper. Peer ID: {peer_id}")
+                # self.client_id_dict is populated by get_local_peer_id if successful
+            else:
+                # This might happen if daemon_info fails for reasons other than wrapper not found (e.g. daemon not running)
+                # The ConnectionError for wrapper not found is raised above.
+                # If get_local_peer_id returns None here, it means daemon_info failed.
+                daemon_error_msg = self.go_wrapper_error or "Failed to retrieve Peer ID using Go wrapper (daemon_info failed)."
+                logger.error(f"Could not retrieve Peer ID from IPFS node at {self.api_addr} using Go wrapper. Daemon might not be running or accessible. Error: {daemon_error_msg}")
+                raise ConnectionError(f"Could not get Peer ID from IPFS node at {self.api_addr}. Error: {daemon_error_msg}")
+        except SciPFSException as e:
+             # Catch SciPFS specific exceptions from get_local_peer_id (like TimeoutError or SciPFSGoWrapperError from daemon_info)
+            logger.error(f"Failed to get Peer ID during IPFSClient initialization via Go wrapper: {e}")
+            raise ConnectionError(f"Failed to initialize IPFSClient due to error getting Peer ID: {e}") from e
+        
 
     def is_go_wrapper_available(self) -> bool:
         """Check if the Go wrapper was successfully found and verified."""
@@ -204,14 +182,30 @@ class IPFSClient:
             raise RuntimeError(f"Unexpected error adding file '{file_path}' with Go wrapper: {str(e)}")
 
     def get_file(self, cid: str, output_path: Path) -> None:
-        """Download a file from IPFS by CID to the specified path."""
+        """Download a file from IPFS by CID to the specified path using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for get_file."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot get file: {error_msg}")
+
+        args = ["--cid", cid, "--output", str(output_path)]
         try:
-            content = self.client.cat(cid)
-            output_path.write_bytes(content)
-            logger.info("Downloaded CID %s to %s", cid, output_path)
-        except Exception as e:
-            logger.error("Failed to download CID %s: %s", cid, e)
+            # We expect a success message, not necessarily data in the 'data' field of the JSON response.
+            # The _execute_go_wrapper_command_json checks for overall success.
+            # If it returns without error, the Go wrapper handled the file download.
+            self._execute_go_wrapper_command_json("get_cid_to_file", *args)
+            logger.info(f"Successfully instructed Go wrapper to download CID {cid} to {output_path}")
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'get_cid_to_file' failed for CID {cid} to {output_path}: {e}")
+            # SciPFSGoWrapperError is already specific enough.
+            # Potentially, os.remove(output_path) if the Go wrapper didn't clean up a partial file on its error.
+            # However, the Go side now attempts os.Remove on its error.
             raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while calling Go wrapper for get_file (CID {cid}, Output {output_path}): {e}")
+            if isinstance(e, SciPFSException):
+                raise # Re-raise if it's already one of ours
+            raise RuntimeError(f"Unexpected error during get_file via Go wrapper for CID {cid}: {str(e)}")
 
     def pin(self, cid: str) -> None:
         """Pin a CID to ensure it remains available using the Go wrapper."""
@@ -268,67 +262,135 @@ class IPFSClient:
             raise RuntimeError(f"Unexpected error pinning CID {cid} with Go wrapper: {e}")
 
     def get_json(self, cid: str) -> Dict:
-        """Retrieve and parse JSON content from IPFS by CID."""
+        """Retrieve and parse JSON content from IPFS by CID using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for get_json."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot get JSON: {error_msg}")
+
         try:
-            content = self.client.cat(cid).decode("utf-8")
-            return json.loads(content)
-        except ipfshttpclient.exceptions.ErrorResponse as e:
-            logger.error(f"Failed to retrieve JSON content for CID {cid} from IPFS: {e}")
-            raise SciPFSException(f"IPFS error retrieving JSON for CID {cid}: {e}") from e
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to decode JSON for CID {cid}. Content is not valid JSON: {e}")
-            raise SciPFSException(f"Content for CID {cid} is not valid JSON.") from e
+            # _execute_go_wrapper_command_json should return the "data" part of the successful JSON response
+            json_data = self._execute_go_wrapper_command_json("get_json_cid", "--cid", cid)
+            if not isinstance(json_data, Dict):
+                logger.error(f"Go wrapper returned non-dict data for get_json_cid (CID: {cid}). Type: {type(json_data)}. Data: {json_data}")
+                raise RuntimeError(f"Go wrapper returned non-dictionary data for JSON content (CID: {cid})")
+            logger.info(f"Successfully retrieved JSON for CID {cid} via Go wrapper.")
+            return json_data
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'get_json_cid' failed for CID {cid}: {e}")
+            raise # The error from _execute_go_wrapper_command_json is already specific
         except Exception as e:
-            logger.error(f"An unexpected error occurred retrieving JSON for CID {cid}: {e}")
-            raise SciPFSException(f"Unexpected error for CID {cid}: {e}") from e
+            logger.error(f"An unexpected error occurred while calling Go wrapper for get_json (CID {cid}): {e}")
+            if isinstance(e, SciPFSException):
+                raise # Re-raise if it's already one of ours
+            raise RuntimeError(f"Unexpected error during get_json via Go wrapper for CID {cid}: {str(e)}")
 
     def add_json(self, data: Dict) -> str:
-        """Add a JSON object to IPFS and return its CID."""
+        """Add a JSON object to IPFS and return its CID using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for add_json."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot add JSON: {error_msg}")
+
         try:
-            cid = self.client.add_json(data)
-            logger.info("Added JSON to IPFS with CID %s", cid)
+            json_string = json.dumps(data)
+        except TypeError as e:
+            logger.error(f"Failed to serialize data to JSON for add_json: {e}. Data: {data}")
+            raise ValueError(f"Invalid data provided for add_json, cannot serialize to JSON: {e}") from e
+
+        try:
+            response_data = self._execute_go_wrapper_command_json("add_json_data", input_data=json_string)
+            
+            if not isinstance(response_data, dict) or "cid" not in response_data:
+                logger.error(f"Go wrapper returned unexpected data for add_json_data. Expected dict with 'cid'. Got: {response_data}")
+                raise RuntimeError("Go wrapper returned invalid response for add_json_data")
+            
+            cid = response_data["cid"]
+            logger.info(f"Successfully added JSON data via Go wrapper. CID: {cid}")
             return cid
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'add_json_data' failed: {e}")
+            raise # The error from _execute_go_wrapper_command_json is already specific
         except Exception as e:
-            logger.error("Failed to add JSON to IPFS: %s", e)
-            raise
+            logger.error(f"An unexpected error occurred while calling Go wrapper for add_json: {e}")
+            if isinstance(e, SciPFSException):
+                raise # Re-raise if it's already one of ours
+            raise RuntimeError(f"Unexpected error during add_json via Go wrapper: {str(e)}")
 
     def generate_ipns_key(self, key_name: str) -> Dict:
-        """Generate a new IPNS key or return its information if it already exists."""
+        """Generate a new IPNS key or return its information if it already exists, using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for generate_ipns_key."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot generate IPNS key: {error_msg}")
+
         try:
-            key_info = self.client.key.gen(key_name, type="rsa", size=2048)
-            logger.info("Generated IPNS key '%s' with ID %s", key_info['Name'], key_info['Id'])
+            # Current Python code uses type="rsa", size=2048 for ipfshttpclient.
+            # The 'ipfs key gen' CLI command with '--type rsa' defaults to 2048 bits.
+            key_info = self._execute_go_wrapper_command_json("gen_ipns_key", "--key-name", key_name, "--key-type", "rsa")
+            
+            if not isinstance(key_info, dict) or "Name" not in key_info or "Id" not in key_info:
+                logger.error(f"Go wrapper returned unexpected data for gen_ipns_key. Expected dict with 'Name' and 'Id'. Got: {key_info}")
+                raise RuntimeError(f"Go wrapper returned invalid response for gen_ipns_key ('{key_name}')")
+
+            logger.info(f"Go wrapper successfully processed 'gen_ipns_key' for '{key_info['Name']}' with ID {key_info['Id']}")
             return key_info
-        except ipfshttpclient.exceptions.ErrorResponse as e:
-            # Check if the error indicates the key already exists.
-            # Older daemons might just raise a generic error that doesn't clearly state "already exists"
-            # but the primary symptom is the failure of key.gen().
-            # So, we'll try to list the keys and see if the desired key_name is present.
-            logger.warning(f"Failed to generate IPNS key '{key_name}' directly (possibly already exists or other daemon error): {e}. Checking if key exists in list.")
+        
+        except SciPFSGoWrapperError as e:
+            logger.warning(f"Go wrapper 'gen_ipns_key' for '{key_name}' failed (possibly already exists or other daemon error): {e}. Checking if key exists.")
             try:
                 keys = self.list_ipns_keys()
                 for key in keys:
                     if key['Name'] == key_name:
-                        logger.info("Found existing IPNS key '%s' with ID %s after initial gen failed.", key['Name'], key['Id'])
+                        logger.info(f"Found existing IPNS key '{key['Name']}' with ID {key['Id']} after Go wrapper gen_ipns_key failed.")
                         return key
-                # If not found in the list after the error, then it was a genuine error not related to existence.
-                logger.error("IPNS key '%s' not found in list after initial gen failed. Original error: %s", key_name, e)
-                raise RuntimeError(f"Failed to generate IPNS key '{key_name}', and it does not appear to exist.") from e
-            except Exception as list_e: # Catch errors during the list_ipns_keys call
-                logger.error("Error while trying to list IPNS keys after failing to generate '%s': %s. Original gen error: %s", key_name, list_e, e)
-                raise RuntimeError(f"Failed to generate IPNS key '{key_name}' and failed to verify existence.") from list_e
-        except Exception as e: # Catch other unexpected errors
-            logger.error("An unexpected error occurred while generating IPNS key '%s': %s", key_name, e)
-            raise RuntimeError(f"Unexpected error generating IPNS key '{key_name}'.") from e
+                logger.error(f"IPNS key '{key_name}' not found in list after Go wrapper gen_ipns_key failed. Original Go wrapper error: {e}")
+                raise RuntimeError(f"Failed to generate IPNS key '{key_name}' via Go wrapper, and it does not appear to exist.") from e
+            except SciPFSException as list_e:
+                logger.error(f"Error while trying to list IPNS keys after failing to generate '{key_name}' via Go wrapper: {list_e}. Original Go error: {e}")
+                raise RuntimeError(f"Failed to generate IPNS key '{key_name}' via Go wrapper and failed to verify existence due to: {list_e}") from list_e
+            except Exception as list_e_unexpected:
+                logger.error(f"Unexpected error listing IPNS keys after gen failure for '{key_name}': {list_e_unexpected}. Original Go error: {e}")
+                raise RuntimeError(f"Unexpected error verifying key '{key_name}' after Go gen failure: {list_e_unexpected}") from list_e_unexpected
+        
+        except Exception as e_unhandled:
+            logger.error(f"An unexpected error occurred during 'generate_ipns_key' for '{key_name}' using Go wrapper: {e_unhandled}")
+            if isinstance(e_unhandled, SciPFSException):
+                raise
+            raise RuntimeError(f"Unexpected error in generate_ipns_key ('{key_name}'): {str(e_unhandled)}")
 
     def list_ipns_keys(self) -> List[Dict]:
-        """List all IPNS keys."""
+        """List all IPNS keys using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for list_ipns_keys."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot list IPNS keys: {error_msg}")
+
         try:
-            keys = self.client.key.list()['Keys']
-            logger.debug("Found %d IPNS keys", len(keys))
-            return keys
-        except Exception as e:
-            logger.error("Failed to list IPNS keys: %s", e)
+            keys_data = self._execute_go_wrapper_command_json("list_ipns_keys_cmd")
+            
+            if not isinstance(keys_data, list):
+                logger.error(f"Go wrapper returned non-list data for list_ipns_keys_cmd. Type: {type(keys_data)}. Data: {keys_data}")
+                raise RuntimeError("Go wrapper returned invalid response for list_ipns_keys_cmd (expected a list)")
+            
+            # Validate structure of items in the list (optional, but good for robustness)
+            validated_keys_list = []
+            for item in keys_data:
+                if isinstance(item, dict) and "Name" in item and "Id" in item:
+                    validated_keys_list.append(item)
+                else:
+                    logger.warning(f"Go wrapper list_ipns_keys_cmd returned an invalid item in the list: {item}. Skipping.")
+            
+            logger.debug(f"Successfully listed {len(validated_keys_list)} IPNS keys via Go wrapper.")
+            return validated_keys_list
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'list_ipns_keys_cmd' failed: {e}")
             raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while calling Go wrapper for list_ipns_keys: {e}")
+            if isinstance(e, SciPFSException):
+                raise
+            raise RuntimeError(f"Unexpected error during list_ipns_keys via Go wrapper: {str(e)}")
 
     def check_key_exists(self, key_name: str) -> bool:
         """Check if an IPNS key with the given name exists."""
@@ -339,145 +401,169 @@ class IPFSClient:
             return False
 
     def publish_to_ipns(self, key_name: str, cid: str, lifetime: str = "24h") -> Dict:
-        """Publish a CID to an IPNS name."""
-        if not cid.startswith("/ipfs/"):
-            path_to_publish = f"/ipfs/{cid}"
-        else:
-            path_to_publish = cid
-        
-        try:
-            if not self.check_key_exists(key_name):
-                logger.warning("Attempting to publish with non-existent key: %s. This may fail.", key_name)
+        """Publish a CID to an IPNS name using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for publish_to_ipns."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot publish to IPNS: {error_msg}")
 
-            publish_result = self.client.name.publish(path_to_publish, key=key_name, lifetime=lifetime)
-            logger.info("Published %s to IPNS name %s (key: %s)", path_to_publish, publish_result['Name'], key_name)
-            return publish_result
-        except Exception as e:
-            logger.error("Failed to publish CID %s to IPNS using key %s: %s", cid, key_name, e)
+        path_to_publish = cid if cid.startswith(('/ipfs/', '/ipns/')) else f'/ipfs/{cid}'
+        
+        # The check_key_exists method now uses the (soon-to-be) Go-backed list_ipns_keys.
+        if not self.check_key_exists(key_name):
+            logger.warning(f"Attempting to publish with IPNS key '{key_name}' which does not appear to exist locally. This may fail or create the key implicitly if the IPFS daemon supports it.")
+            # Unlike the old ipfshttpclient, `ipfs name publish` CLI (and thus the Go wrapper)
+            # might create the key if it doesn't exist, but it will be a new random key,
+            # not necessarily named `key_name` in the keystore unless `key_name` was `self`
+            # or if a specific behavior of `ipfs name publish --key=<name_not_exist>` creates it with that name.
+            # This warning is useful for consistency.
+
+        try:
+            args = [
+                "--key-name", key_name,
+                "--path", path_to_publish,
+                "--lifetime", lifetime
+            ]
+            response_data = self._execute_go_wrapper_command_json("publish_ipns", *args)
+            
+            if not isinstance(response_data, dict) or "Name" not in response_data or "Value" not in response_data:
+                logger.error(f"Go wrapper returned unexpected data for publish_ipns. Expected dict with 'Name' and 'Value'. Got: {response_data}")
+                raise RuntimeError("Go wrapper returned invalid response for publish_ipns")
+
+            logger.info(f"Successfully published {response_data['Value']} to IPNS name {response_data['Name']} (key: {key_name}) via Go wrapper.")
+            return response_data
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'publish_ipns' failed for key '{key_name}', path '{path_to_publish}': {e}")
             raise
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while calling Go wrapper for publish_to_ipns (key '{key_name}', path '{path_to_publish}'): {e}")
+            if isinstance(e, SciPFSException):
+                raise
+            raise RuntimeError(f"Unexpected error during publish_to_ipns via Go wrapper: {str(e)}")
 
     def resolve_ipns_name(self, ipns_name: str) -> str:
-        """Resolve an IPNS name to its currently published IPFS path."""
+        """Resolve an IPNS name to its currently published IPFS path using the Go wrapper."""
         if not ipns_name.startswith("/ipns/"):
+            # This check is maintained from original code for consistency of this Python method's input validation.
+            # The underlying 'ipfs name resolve' CLI (and thus Go wrapper) can often handle bare k51... names.
             raise ValueError("IPNS name must start with /ipns/")
-        try:
-            resolved = self.client.name.resolve(ipns_name)
 
-            resolved_path = resolved['Path']
-            logger.info("Resolved IPNS name %s to %s", ipns_name, resolved_path)
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for resolve_ipns_name."
+            logger.error(error_msg)
+            raise ConnectionError(f"Cannot resolve IPNS name: {error_msg}")
+
+        try:
+            # Go wrapper defaults nocache=true, recursive=true, which matches desired behavior.
+            args = ["--ipns-name", ipns_name]
+            # Example if we wanted to control these from Python:
+            # args.extend(["--nocache=true", "--recursive=true"]) 
+            
+            response_data = self._execute_go_wrapper_command_json("resolve_ipns", *args)
+            
+            if not isinstance(response_data, dict) or "Path" not in response_data:
+                logger.error(f"Go wrapper returned unexpected data for resolve_ipns. Expected dict with 'Path'. Got: {response_data}")
+                raise RuntimeError(f"Go wrapper returned invalid response for resolve_ipns ('{ipns_name}')")
+            
+            resolved_path = response_data["Path"]
+            logger.info(f"Successfully resolved IPNS name {ipns_name} to {resolved_path} via Go wrapper.")
             return resolved_path
-        except ipfshttpclient.exceptions.ErrorResponse as e:
-            if "could not resolve name" in str(e) or "record not found" in str(e) :
-                logger.warning("Could not resolve IPNS name %s: %s", ipns_name, e)
+        
+        except SciPFSGoWrapperError as e:
+            # Specific handling for "could not resolve name" or similar, map to FileNotFoundError like original.
+            # This requires inspecting the error message string from Go, which is fragile.
+            # Ideally, Go wrapper would return specific error codes/types if possible.
+            error_str = str(e).lower()
+            if "could not resolve name" in error_str or "record not found" in error_str or "routing: not found" in error_str or "could not find record" in error_str:
+                logger.warning(f"Could not resolve IPNS name {ipns_name} via Go wrapper: {e}")
                 raise FileNotFoundError(f"Could not resolve IPNS name {ipns_name}. It may not exist or not be propagated yet.") from e
-            logger.error("Error resolving IPNS name %s: %s", ipns_name, e)
-            raise
+            
+            logger.error(f"Go wrapper command 'resolve_ipns' failed for IPNS name '{ipns_name}': {e}")
+            raise # Re-raise other SciPFSGoWrapperErrors
+        
         except Exception as e:
-            logger.error("Unexpected error resolving IPNS name %s: %s", ipns_name, e)
-            raise
+            logger.error(f"An unexpected error occurred while calling Go wrapper for resolve_ipns_name ('{ipns_name}'): {e}")
+            if isinstance(e, SciPFSException):
+                raise
+            raise RuntimeError(f"Unexpected error during resolve_ipns_name via Go wrapper: {str(e)}")
 
     def get_pinned_cids(self) -> set[str]:
-        """Retrieve a set of all CIDs currently pinned by the local IPFS node."""
+        """Retrieve a set of all CIDs currently pinned by the local IPFS node using the Go wrapper."""
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for get_pinned_cids."
+            logger.error(error_msg)
+            # Consistent with original behavior, return empty set on major failure to connect/find wrapper.
+            return set()
+
         try:
-            pinned_items = self.client.pin.ls(type='recursive')
-            cids = set(pinned_items.get('Keys', {}).keys())
-            logger.info("Retrieved %d pinned CIDs from the local node.", len(cids))
-            return cids
-        except ipfshttpclient.exceptions.ErrorResponse as e:
-            logger.error(f"IPFS Error retrieving pinned CIDs: {e}")
-            return set()
+            # Current Python code specifically gets 'recursive' pins.
+            response_data = self._execute_go_wrapper_command_json("list_pinned_cids", "--pin-type", "recursive")
+            
+            if not isinstance(response_data, dict) or "cids" not in response_data or not isinstance(response_data["cids"], list):
+                logger.error(f"Go wrapper returned unexpected data for list_pinned_cids. Expected dict with a list 'cids'. Got: {response_data}")
+                return set() # Return empty set on unexpected data structure
+            
+            cids_list = response_data["cids"]
+            # Ensure all items in list are strings, as CIDs should be.
+            valid_cids = {str(item) for item in cids_list if isinstance(item, str)}
+            
+            logger.info(f"Successfully retrieved {len(valid_cids)} pinned CIDs (recursive) via Go wrapper.")
+            return valid_cids
+        
+        except SciPFSGoWrapperError as e:
+            # This indicates the Go command itself failed (e.g. ipfs pin ls errored)
+            logger.error(f"Go wrapper command 'list_pinned_cids' failed: {e}")
+            return set() # Original code returns empty set on IPFS ErrorResponse
+        
         except Exception as e:
-            logger.error("Failed to retrieve pinned CIDs: %s", e, exc_info=True)
-            # Return an empty set on error to allow dependant commands to function gracefully
-            return set()
+            logger.error(f"An unexpected error occurred while calling Go wrapper for get_pinned_cids: {e}", exc_info=True)
+            return set() # Return empty set on any other exception, consistent with original
 
     def find_providers(self, cid: str, timeout: int = 60) -> Set[str]:
-        """Find peers providing a given CID.
-
-        Attempts to use the client API first. If that fails due to specific known
-        API deprecation errors (e.g., on older daemons), it falls back to calling
-        the `ipfs routing findprovs` command via subprocess.
+        """Find peers providing a given CID using the Go wrapper.
+        The timeout parameter applies to the execution of the Go wrapper process.
         """
-        providers = set()
-        primary_method_failed_due_to_api = False
+        if not self.is_go_wrapper_available():
+            error_msg = self.go_wrapper_error or "Go wrapper not available for find_providers."
+            logger.error(error_msg)
+            return set() # Consistent with original behavior on failure
 
-        # --- Primary Method: Use ipfshttpclient API --- 
         try:
-            logger.info(f"Attempting API call dht.findprovs for CID {cid} (timeout={timeout}s)...")
-            provs_stream = self.client.dht.findprovs(cid, timeout=timeout)
-            
-            for prov_info in provs_stream:
-                if isinstance(prov_info, dict) and prov_info.get('Type') == 4:
-                    responses = prov_info.get('Responses')
-                    if isinstance(responses, list):
-                        for peer_data in responses:
-                            if isinstance(peer_data, dict) and 'ID' in peer_data:
-                                providers.add(peer_data['ID'])
-            
-            if not providers:
-                 logger.info(f"API call: No providers found for CID {cid} within the timeout.")
-            else:
-                 logger.info(f"API call: Found {len(providers)} providers for CID {cid}.")
-            return providers # Success with primary method
+            # The Go helper has a default for --num-providers=20, matching original code.
+            # The timeout for _execute_go_wrapper_command_json_with_timeout needs to be implemented
+            # or the existing _execute_go_wrapper_command_json needs to accept a timeout.
+            # For now, let's assume _execute_go_wrapper_command_json can take a timeout or we make a variant.
 
-        except ipfshttpclient.exceptions.TimeoutError:
-             logger.warning(f"Timeout occurred after {timeout} seconds during API call dht.findprovs for CID {cid}.")
-             # Do not fall back on timeout, as the command line might also timeout
-        except ipfshttpclient.exceptions.ErrorResponse as e:
-             error_str = str(e).lower()
-             # Check for specific error messages indicating the API is deprecated/removed
-             if "use 'ipfs routing' instead" in error_str or "no command found" in error_str:
-                 logger.warning(f"API call dht.findprovs failed for CID {cid} (likely unsupported by daemon). Will attempt fallback using `ipfs routing findprovs` CLI command. Error: {e}")
-                 primary_method_failed_due_to_api = True # Signal that fallback should be tried
-             elif "routing: not found" in error_str:
-                 logger.warning(f"API call: Could not find providers for CID {cid} (likely not available on the network): {e}")
-                 # Content not found via API, unlikely CLI will find it either, don't fallback.
-             else:
-                 logger.error(f"IPFS error response during API call dht.findprovs for CID {cid}: {e}")
-                 # Unknown API error, might not be recoverable by CLI fallback.
+            # Modifying _execute_go_wrapper_command_json to accept a timeout parameter.
+            # This is a conceptual change to the helper; the edit below will reflect this.
+            response_data = self._execute_go_wrapper_command_json(
+                "find_providers_cid", 
+                "--cid", cid, 
+                # "--num-providers", "20", # Go helper defaults to 20
+                timeout_seconds=timeout # Pass timeout to the helper execution
+            )
+            
+            if not isinstance(response_data, dict) or \
+               "providers" not in response_data or \
+               not isinstance(response_data["providers"], list):
+                logger.error(f"Go wrapper returned unexpected data for find_providers_cid. Expected dict with list 'providers'. Got: {response_data}")
+                return set() 
+            
+            providers_list = response_data["providers"]
+            valid_providers = {str(item) for item in providers_list if isinstance(item, str) and item.strip()}
+            
+            logger.info(f"Found {len(valid_providers)} providers for CID {cid} via Go wrapper.")
+            return valid_providers
+        
+        except TimeoutError: # This would be raised by _execute_go_wrapper_command_json if it supports timeout
+            logger.warning(f"Timeout occurred after {timeout} seconds during find_providers for CID {cid} via Go wrapper.")
+            return set()
+        except SciPFSGoWrapperError as e:
+            logger.error(f"Go wrapper command 'find_providers_cid' failed for CID {cid}: {e}")
+            return set() 
         except Exception as e:
-            logger.error(f"Unexpected error during API call dht.findprovs for CID {cid}: {e}", exc_info=True)
-            # Unexpected API error, might not be recoverable by CLI fallback.
-
-        # --- Fallback Method: Use `ipfs routing findprovs` CLI command --- 
-        if primary_method_failed_due_to_api:
-            logger.info(f"Attempting fallback using `ipfs routing findprovs {cid}` CLI command...")
-            try:
-                # Use a timeout for the subprocess as well, slightly less than the main timeout?
-                # Note: subprocess timeout is for the whole command execution.
-                cli_timeout = max(5, timeout - 5) # Give some buffer
-                result = subprocess.run(
-                    ["ipfs", "routing", "findprovs", cid],
-                    capture_output=True,
-                    text=True,
-                    check=False, # Don't raise exception on non-zero exit code immediately
-                    timeout=cli_timeout
-                )
-                
-                if result.returncode == 0:
-                    output_lines = result.stdout.strip().split('\n')
-                    for line in output_lines:
-                        peer_id = line.strip()
-                        if peer_id: # Basic validation: non-empty string
-                           # Could add more robust Peer ID validation if needed (e.g., starts with Qm or 12D)
-                           providers.add(peer_id)
-                    logger.info(f"CLI Fallback: Found {len(providers)} providers for CID {cid}.")
-                    return providers # Success with fallback
-                else:
-                    # Command failed
-                    stderr_output = result.stderr.strip()
-                    logger.error(f"CLI fallback command `ipfs routing findprovs {cid}` failed (exit code {result.returncode}). Stderr: {stderr_output}")
-            
-            except FileNotFoundError:
-                logger.error("CLI fallback failed: 'ipfs' command not found in PATH. Cannot execute `ipfs routing findprovs`.")
-            except subprocess.TimeoutExpired:
-                logger.error(f"CLI fallback command `ipfs routing findprovs {cid}` timed out after {cli_timeout} seconds.")
-            except Exception as e:
-                logger.error(f"Unexpected error during CLI fallback execution for CID {cid}: {e}", exc_info=True)
-
-        # If we reach here, both primary and (if attempted) fallback methods failed.
-        logger.warning(f"Could not determine providers for CID {cid} using API or CLI fallback.")
-        return set() # Return empty set indicating failure
+            logger.error(f"An unexpected error occurred while calling Go wrapper for find_providers (CID {cid}): {e}", exc_info=True)
+            return set()
 
     def get_daemon_info(self) -> Optional[Dict]:
         """Get IPFS daemon info (Version, ID) using the Go wrapper."""
@@ -533,37 +619,39 @@ class IPFSClient:
             return None
 
     def get_local_peer_id(self) -> Optional[str]:
-        """Returns the Peer ID of the connected IPFS node."""
-        if self.client_id_dict:
+        """Returns the Peer ID of the connected IPFS node, obtained via the Go wrapper."""
+        if self.client_id_dict and 'ID' in self.client_id_dict:
             return self.client_id_dict.get('ID')
         
-        # Fallback if ipfshttpclient connection failed but go_wrapper might work
-        if not self.client and self.is_go_wrapper_available():
-            try:
-                logger.info("Attempting to get Peer ID via Go wrapper as fallback...")
-                # Assuming the Go wrapper's 'id' command outputs JSON similar to 'ipfs id'
-                id_info = self._execute_go_wrapper_command_json("id")
-                peer_id = id_info.get("ID")
-                if peer_id:
-                    logger.info(f"Successfully retrieved Peer ID via Go wrapper: {peer_id}")
-                    # Cache it if desired, though self.client_id_dict is usually from http client
-                    # self.client_id_dict = id_info 
-                    return peer_id
-                else:
-                    logger.warning("Go wrapper 'id' command did not return an 'ID' field in data.")
-                    return None
-            except SciPFSGoWrapperError as e:
-                logger.warning(f"Go wrapper 'id' command failed: {e}")
+        # If client_id_dict wasn't populated during __init__ or got cleared, try to fetch it.
+        # This path would typically indicate an issue during initialization.
+        logger.info("Attempting to get Peer ID via Go wrapper (get_local_peer_id)...")
+        try:
+            # The 'daemon_info' command in Go wrapper returns ID, AgentVersion etc.
+            id_info = self._execute_go_wrapper_command_json("daemon_info") 
+            peer_id = id_info.get("ID")
+            if peer_id:
+                logger.info(f"Successfully retrieved Peer ID via Go wrapper: {peer_id}")
+                self.client_id_dict = id_info # Cache it
+                return peer_id
+            else:
+                logger.warning("Go wrapper 'daemon_info' command did not return an 'ID' field in data.")
                 return None
-            except Exception as e:
-                logger.warning(f"An unexpected error occurred trying to get Peer ID via Go wrapper: {e}")
-                return None
+        except SciPFSException as e: # Catch SciPFSGoWrapperError, TimeoutError etc.
+            logger.warning(f"Go wrapper 'daemon_info' command failed while attempting to get Peer ID: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"An unexpected error occurred trying to get Peer ID via Go wrapper: {e}")
+            return None
         
-        logger.warning("Could not determine local Peer ID via ipfshttpclient or Go wrapper fallback.")
+        # This line should ideally not be reached if Go wrapper is functional and daemon is responsive.
+        logger.warning("Could not determine local Peer ID using the Go wrapper.")
         return None
 
-    def _execute_go_wrapper_command_json(self, go_command: str, *args: str) -> Dict:
-        """Execute a Go wrapper command that is expected to return JSON and parse it."""
+    def _execute_go_wrapper_command_json(self, go_command: str, *args: str, input_data: Optional[str] = None, timeout_seconds: int = 120) -> Dict:
+        """Execute a Go wrapper command that is expected to return JSON and parse it.
+        Can optionally send input_data to the command's stdin and specify a timeout for the subprocess execution.
+        """
         if not self.is_go_wrapper_available():
             error_msg = self.go_wrapper_error or f"Go wrapper not available for command '{go_command}'."
             logger.error(error_msg)
@@ -577,32 +665,39 @@ class IPFSClient:
         ]
 
         try:
-            logger.debug(f"Executing Go wrapper command: {' '.join(command)}")
-            # Using a moderate timeout, adjust if specific commands are known to be long-running
-            result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=60)
+            logger.debug(f"Executing Go wrapper command: {' '.join(command)} {'with input data' if input_data else ''} (timeout: {timeout_seconds}s)")
+            process = subprocess.run(
+                command, 
+                capture_output=True, 
+                text=True, 
+                check=False, 
+                timeout=timeout_seconds, 
+                input=input_data
+            )
 
-            if result.returncode == 0:
+            if process.returncode == 0:
                 try:
-                    response_json = json.loads(result.stdout)
+                    response_json = json.loads(process.stdout)
                     if response_json.get("success"):
                         # Assuming successful responses place their payload in "data"
-                        return response_json.get("data", {})
+                        # or the whole response is the data if "data" field is not present (e.g. for get_json_cid)
+                        return response_json.get("data", response_json) 
                     else:
                         error_msg = response_json.get("error", f"Unknown error from Go wrapper's {go_command}")
-                        logger.error(f"Go wrapper command '{go_command}' failed: {error_msg}. stdout: {result.stdout.strip()}")
+                        logger.error(f"Go wrapper command '{go_command}' failed: {error_msg}. stdout: {process.stdout.strip()}")
                         raise SciPFSGoWrapperError(f"Go wrapper command '{go_command}' failed: {error_msg}")
                 except json.JSONDecodeError:
-                    logger.error(f"Failed to decode JSON response from Go wrapper for {go_command}. stdout: {result.stdout.strip()}")
+                    logger.error(f"Failed to decode JSON response from Go wrapper for {go_command}. stdout: {process.stdout.strip()}")
                     raise SciPFSGoWrapperError(f"Failed to decode JSON from Go wrapper for {go_command}")
             else:
-                error_detail = result.stderr.strip()
+                error_detail = process.stderr.strip()
                 try:
                     error_json = json.loads(error_detail)
                     error_detail = error_json.get("error", error_detail)
                 except json.JSONDecodeError:
                     pass # Use raw stderr if not JSON
-                logger.error(f"Go wrapper command '{go_command}' failed with exit code {result.returncode}. Stderr: {error_detail}")
-                raise SciPFSGoWrapperError(f"Go wrapper command '{go_command}' failed with exit {result.returncode}: {error_detail}")
+                logger.error(f"Go wrapper command '{go_command}' failed with exit code {process.returncode}. Stderr: {error_detail}")
+                raise SciPFSGoWrapperError(f"Go wrapper command '{go_command}' failed with exit {process.returncode}: {error_detail}")
         except subprocess.TimeoutExpired:
             logger.error(f"Timeout during '{go_command}' command with Go wrapper.")
             raise TimeoutError(f"Timeout during '{go_command}' with Go wrapper.")

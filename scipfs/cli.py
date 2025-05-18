@@ -8,7 +8,6 @@ from . import config as scipfs_config # Import the new config module
 from . import __version__ as scipfs_version # Import scipfs version
 import os # Added for path operations
 from typing import Set, Dict, List, Optional # Added Set, Dict, Optional
-import ipfshttpclient # Import ipfshttpclient to get its version
 import subprocess
 import json
 
@@ -696,15 +695,14 @@ def list_pinned_cmd():
 def availability_cmd(ctx, name: str, file_name_option: Optional[str], cmd_verbose_flag: bool, timeout: int):
     """Check the network availability of files in a library or a specific file.
 
-    This command uses the IPFS DHT (via API or CLI fallback) to find peers
+    This command uses the IPFS DHT (via the scipfs_go_helper) to find peers
     (providers) for the library's manifest CID and/or specific file CIDs.
     It provides a summary of how many providers are found.
     
-    NOTE: Performance depends on the IPFS daemon version. Ideally, use a
-    daemon version compatible with the underlying IPFS client library 
-    (v0.5.0-v0.8.x recommended) for faster API calls. Older daemons may trigger a
-    slower fallback mechanism that executes `ipfs routing findprovs` via the CLI,
-    which requires `ipfs` to be in the system PATH.
+    NOTE: This operation queries the IPFS Distributed Hash Table (DHT).
+    The performance and success of finding providers can depend on network
+    conditions, the IPFS daemon's connectivity, and how widely the content
+    is distributed. Ensure your IPFS daemon is running and well-connected.
     """
     # Command specific verbosity overrides global verbosity for its Peer ID list
     show_peer_ids = cmd_verbose_flag or ctx.obj.get('VERBOSE', False)

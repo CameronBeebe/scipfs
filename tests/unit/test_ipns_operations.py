@@ -2,8 +2,7 @@
 import unittest
 import tempfile
 from pathlib import Path
-from scipfs.ipfs import IPFSClient, RuntimeError, FileNotFoundError
-import ipfshttpclient
+from scipfs.ipfs import IPFSClient, RuntimeError, FileNotFoundError, SciPFSGoWrapperError
 
 class TestIPNSOperations(unittest.TestCase):
     def setUp(self):
@@ -24,13 +23,15 @@ class TestIPNSOperations(unittest.TestCase):
         shutil.rmtree(self.test_dir)
 
         # Remove the test IPNS key if it exists
-        try:
-            keys = self.client.list_ipns_keys()
-            if any(k['Name'] == self.test_key_name for k in keys):
-                self.client.client.key.rm(self.test_key_name)
-        except Exception as e:
-            # Log or print the exception if needed, but don't let it fail teardown
-            print(f"Error during IPNS key cleanup: {e}")
+        # try:
+        #     keys = self.client.list_ipns_keys()
+        #     if any(k['Name'] == self.test_key_name for k in keys):
+        #         # self.client.client.key.rm(self.test_key_name) # This line caused error as self.client.client is None
+        #         # Key removal is not part of the current Go wrapper migration scope.
+        #         pass # If key removal was implemented, it would be called here.
+        # except Exception as e:
+        #     # Log or print the exception if needed, but don't let it fail teardown
+        #     print(f"Error during IPNS key cleanup: {e}")
         
     def test_generate_ipns_key_success(self):
         """Test successful IPNS key generation."""
@@ -124,7 +125,7 @@ class TestIPNSOperations(unittest.TestCase):
         self.assertIsNotNone(cid, "Failed to add test file")
         
         # 3. Attempt to publish
-        with self.assertRaises(ipfshttpclient.exceptions.ErrorResponse) as context:
+        with self.assertRaises(SciPFSGoWrapperError) as context:
             self.client.publish_to_ipns(nonexistent_key, cid)
             
         # 4. Verify appropriate error is raised
