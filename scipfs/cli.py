@@ -1,7 +1,7 @@
 import click
 import logging
 from pathlib import Path
-from .ipfs import IPFSClient
+from .ipfs import IPFSClient, SciPFSGoWrapperError
 from .library import Library
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
@@ -10,6 +10,7 @@ import os # Added for path operations
 from typing import Set, Dict, List, Optional # Added Set, Dict, Optional
 import subprocess
 import json
+import re # For parsing version strings
 
 # Configure logging
 # Basic config for the whole application, individual loggers can be adjusted
@@ -29,6 +30,10 @@ CONFIG_DIR = Path.home() / ".scipfs"
 # Ensure CONFIG_DIR is created if it doesn't exist for library manifests
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 scipfs_config_instance = scipfs_config.SciPFSConfig(CONFIG_DIR)
+library_logger = logging.getLogger("scipfs.library") # Make sure library_logger is defined if used in complete_file_names
+
+REQUIRED_IPFS_KUBO_VERSION_TUPLE = (0, 34, 1)
+REQUIRED_IPFS_KUBO_VERSION_STR = ".".join(map(str, REQUIRED_IPFS_KUBO_VERSION_TUPLE))
 
 # Shell completion for library file names
 def complete_file_names(ctx, param, incomplete):
@@ -835,6 +840,7 @@ def doctor(ctx):
     """
     click.echo("--- SciPFS Doctor ---")
     click.echo(f"SciPFS Version: {scipfs_version}")
+    click.echo(f"Required IPFS (Kubo) Version: {REQUIRED_IPFS_KUBO_VERSION_STR}+")
 
     # Get API address from config for IPFSClient initialization
     # This uses the global scipfs_config_instance already defined in cli.py
@@ -844,72 +850,125 @@ def doctor(ctx):
         api_addr_for_client = "/ip4/127.0.0.1/tcp/5001" # Default if config fails
         click.echo(f"Warning: Error getting API address from config: {e_conf}. Using default API address: {api_addr_for_client}.", err=True)
 
-    # Instantiate IPFSClient to use its Go wrapper detection and methods
-    # The IPFSClient __init__ will attempt to find and verify the Go wrapper.
-    ipfs_client = IPFSClient(addr=api_addr_for_client)
+    ipfs_client = None
+    try:
+        ipfs_client = IPFSClient(addr=api_addr_for_client)
+        click.echo("\n--- Go Wrapper Status ---")
+        if ipfs_client.is_go_wrapper_available():
+            click.echo(f"Go Wrapper ('{ipfs_client.go_wrapper_path}'): Found and Verified")
+            click.echo(f"Go Wrapper Version: {ipfs_client.go_wrapper_version}")
+        else:
+            click.echo(f"Go Wrapper ('{ipfs_client.go_wrapper_executable_name}'): NOT FOUND or FAILED CHECK.")
+            if ipfs_client.go_wrapper_error:
+                click.echo(f"  Error details: {ipfs_client.go_wrapper_error}")
+            click.echo(f"  Ensure '{ipfs_client.go_wrapper_executable_name}' is compiled (run ./build_go_wrapper.sh) and accessible either in the current directory or in your system PATH.")
+            # Early exit if wrapper isn't even there, daemon check is pointless
+            click.echo("\nDoctor check incomplete due to Go wrapper issue.", err=True)
+            return
 
-    click.echo("\n--- Go Wrapper Status ---")
-    if ipfs_client.is_go_wrapper_available():
-        click.echo(f"Go Wrapper ('{ipfs_client.go_wrapper_path}'): Found and Verified")
-        click.echo(f"Go Wrapper Version: {ipfs_client.go_wrapper_version}")
-    else:
-        click.echo(f"Go Wrapper ('{ipfs_client.go_wrapper_executable_name}'): NOT FOUND or FAILED CHECK.")
-        if ipfs_client.go_wrapper_error:
-            click.echo(f"  Error details: {ipfs_client.go_wrapper_error}")
-        click.echo(f"  Ensure '{ipfs_client.go_wrapper_executable_name}' is compiled (run ./build_go_wrapper.sh) and accessible either in the current directory or in your system PATH.")
+    except ConnectionError as e: # This catches IPFSClient init errors, including wrapper not found/functional
+        click.echo("\n--- Go Wrapper Status ---")
+        click.echo(f"Go Wrapper ('{IPFSClient.go_wrapper_executable_name}'): FAILED INITIALIZATION.")
+        click.echo(f"  Error details: {e}")
+        if "IPFS Version Check Failed" in str(e) or "older than required version" in str(e):
+             click.echo(f"  This indicates your IPFS (Kubo) daemon version is older than the required {REQUIRED_IPFS_KUBO_VERSION_STR}.")
+             click.echo(f"  Please upgrade your Kubo daemon to version {REQUIRED_IPFS_KUBO_VERSION_STR} or newer.")
+        else:
+            click.echo(f"  Ensure '{IPFSClient.go_wrapper_executable_name}' is compiled (run ./build_go_wrapper.sh) and accessible.")
+            click.echo(f"  Also ensure your IPFS daemon is running and accessible at API: {api_addr_for_client}")
+        click.echo("\nDoctor check incomplete due to Go wrapper/IPFS daemon issue.", err=True)
+        return # Exit doctor if IPFSClient can't be initialized
 
     click.echo("\n--- IPFS Daemon Status (via Go Wrapper) ---")
     daemon_id = "Unknown"
-    daemon_version = "Unknown"
-    daemon_addresses_count = 0 # Placeholder, can be expanded if daemon_info provides more
+    daemon_version_str = "Unknown"
+    daemon_addresses_count = 0
+    daemon_status_ok = False
 
-    if ipfs_client.is_go_wrapper_available():
-        daemon_info = ipfs_client.get_daemon_info() # This now uses the method from IPFSClient
-        if daemon_info:
-            daemon_id = daemon_info.get("ID", "N/A")
-            # Assuming Go wrapper provides AgentVersion, adjust if key is different (e.g., "Version")
-            daemon_version = daemon_info.get("AgentVersion") or daemon_info.get("Version", "N/A") 
-            daemon_addresses_count = len(daemon_info.get("Addresses", []))
-            click.echo("Status: Successfully queried daemon via Go wrapper.")
-            click.echo(f"IPFS Peer ID: {daemon_id}")
-            click.echo(f"IPFS Daemon Version: {daemon_version}")
-            click.echo(f"Known Addresses: {daemon_addresses_count}") # Example, if Addresses are part of daemon_info
-        else:
-            click.echo("Status: Failed to get daemon info via Go wrapper.")
-            if ipfs_client.go_wrapper_error:
-                 click.echo(f"  Error details: {ipfs_client.go_wrapper_error}")
-            click.echo("  Ensure IPFS daemon is running and API address ('{ipfs_client.api_addr}') is correct.")
-    else:
-        click.echo("Status: Skipped daemon check via Go wrapper because wrapper is not available.")
+    if ipfs_client.is_go_wrapper_available(): # Should be true if we reached here
+        daemon_info = None
+        try:
+            daemon_info = ipfs_client.get_daemon_info() # This now uses the method from IPFSClient
+            if daemon_info:
+                daemon_id = daemon_info.get("ID", "N/A")
+                daemon_version_str = daemon_info.get("AgentVersion") or daemon_info.get("Version", "N/A")
+                daemon_addresses_count = len(daemon_info.get("Addresses", []))
+                click.echo("Status: Successfully queried daemon via Go wrapper.")
+                click.echo(f"IPFS Peer ID: {daemon_id}")
+                click.echo(f"IPFS Daemon Version: {daemon_version_str}")
+                click.echo(f"Known Addresses: {daemon_addresses_count}")
+                daemon_status_ok = True
+
+                # Perform version comparison
+                parsed_daemon_version = None
+                if daemon_version_str and daemon_version_str not in ["Unknown", "N/A"]:
+                    match = re.search(r'(\d+\.\d+\.\d+)', daemon_version_str)
+                    if match:
+                        try:
+                            parsed_daemon_version = tuple(map(int, match.group(1).split('.')))
+                        except ValueError:
+                            click.echo("  Warning: Could not parse numeric parts of daemon version for comparison.", err=True)
+                
+                if parsed_daemon_version:
+                    if parsed_daemon_version >= REQUIRED_IPFS_KUBO_VERSION_TUPLE:
+                        click.echo(f"  Version Compatibility: OK (Daemon version {match.group(1)} meets requirement {REQUIRED_IPFS_KUBO_VERSION_STR}+)")
+                    else:
+                        # This case should ideally be caught by the Go wrapper's own startup check.
+                        # If we see this, it might indicate an issue with the Go wrapper's check or a very specific scenario.
+                        click.echo(f"  Version Compatibility: WARNING - Daemon version {match.group(1)} is older than required {REQUIRED_IPFS_KUBO_VERSION_STR}+.", err=True)
+                        click.echo("  The SciPFS Go helper should have exited due to this. If SciPFS commands are still partially working, behavior may be unpredictable.", err=True)
+                elif daemon_version_str not in ["Unknown", "N/A"]:
+                    click.echo(f"  Version Compatibility: Could not parse daemon version '{daemon_version_str}' for comparison against {REQUIRED_IPFS_KUBO_VERSION_STR}+.", err=True)
+
+            else: # daemon_info is None
+                click.echo("Status: Failed to get daemon info via Go wrapper.")
+                if ipfs_client.go_wrapper_error:
+                    click.echo(f"  Error details from Go wrapper: {ipfs_client.go_wrapper_error}")
+                    if "IPFS Version Check Failed" in ipfs_client.go_wrapper_error or "older than required version" in ipfs_client.go_wrapper_error :
+                         click.echo(f"  This likely means your IPFS (Kubo) daemon version is older than the required {REQUIRED_IPFS_KUBO_VERSION_STR}.")
+                         click.echo(f"  Please upgrade your Kubo daemon to version {REQUIRED_IPFS_KUBO_VERSION_STR} or newer.")
+                    elif "context deadline exceeded" in ipfs_client.go_wrapper_error or "connection refused" in ipfs_client.go_wrapper_error:
+                         click.echo("  This often means the IPFS daemon is not running or not accessible at the API address.")
+                click.echo(f"  Ensure IPFS daemon is running and API address ('{ipfs_client.api_addr}') is correct.")
+        except SciPFSGoWrapperError as e: # Catch errors from get_daemon_info itself
+            click.echo("Status: Failed to get daemon info due to Go wrapper error.")
+            click.echo(f"  Error details: {e}")
+            if "IPFS Version Check Failed" in str(e) or "older than required version" in str(e):
+                 click.echo(f"  This indicates your IPFS (Kubo) daemon version is older than the required {REQUIRED_IPFS_KUBO_VERSION_STR}.")
+                 click.echo(f"  Please upgrade your Kubo daemon to version {REQUIRED_IPFS_KUBO_VERSION_STR} or newer.")
+            elif "context deadline exceeded" in str(e) or "connection refused" in str(e):
+                 click.echo("  This often means the IPFS daemon is not running or not accessible at the API address.")
+            click.echo(f"  Ensure IPFS daemon is running and API address ('{ipfs_client.api_addr}') is correct.")
+
+    else: # Should not happen if IPFSClient initialized correctly
+        click.echo("Status: Skipped daemon check because Go wrapper was reported as not available by IPFSClient (unexpected state).")
 
     click.echo("\n--- Compatibility and Update Advice ---")
-    click.echo("scipfs is transitioning to a Go-based helper for IPFS interaction.")
-    if ipfs_client.is_go_wrapper_available() and ipfs_client.is_go_wrapper_available() != "N/A":
+    click.echo(f"SciPFS relies on its Go Helper ('{ipfs_client.go_wrapper_executable_name if ipfs_client else IPFSClient.go_wrapper_executable_name}') and a compatible IPFS Kubo daemon.")
+    click.echo(f"Required IPFS (Kubo) version: {REQUIRED_IPFS_KUBO_VERSION_STR} or newer.")
+
+    if ipfs_client and ipfs_client.is_go_wrapper_available() and ipfs_client.go_wrapper_version != "N/A":
         click.echo(f"Active Go Helper version: {ipfs_client.go_wrapper_version}")
     else:
-        click.echo("Go Helper status: Unknown or not found. Build it with ./build_go_wrapper.sh")
+        click.echo(f"Go Helper status: Not found or non-functional. Build it with ./build_go_wrapper.sh")
 
-    if daemon_version != "Unknown" and daemon_version != "N/A":
-        click.echo(f"Detected IPFS Daemon version: {daemon_version}")
-        # Add specific compatibility advice if known for the go-kubo-rpc client version used by the wrapper
+    if daemon_status_ok and daemon_version_str not in ["Unknown", "N/A"]:
+        click.echo(f"Detected IPFS Daemon version: {daemon_version_str}")
+    elif not daemon_status_ok and ipfs_client and ("IPFS Version Check Failed" in ipfs_client.go_wrapper_error if ipfs_client.go_wrapper_error else False):
+        # Already handled by the specific message about version failure
+        pass
     else:
-        click.echo("Could not determine IPFS Daemon version via Go wrapper.")
+        click.echo("Could not determine IPFS Daemon version (daemon info query failed or wrapper not available).")
     
-    click.echo("Ensure your Kubo daemon version is up-to-date and compatible with modern IPFS API standards.")
-
     click.echo("\nRecommendations:")
-    click.echo("1. Ensure the SciPFS Go Helper ('scipfs_go_helper') is built: run ./build_go_wrapper.sh")
-    click.echo("2. Keep your Kubo (go-ipfs) daemon updated.")
-    click.echo("   - Download from IPFS Distributions: https://dist.ipfs.tech/#kubo")
-    click.echo("   - GitHub releases: https://github.com/ipfs/kubo/releases")
-    click.echo("3. If 'scipfs availability' or other commands have issues (post-transition):")
-    click.echo("   - Check the Go Helper status above.")
-    click.echo("   - Ensure your Kubo daemon is compatible with the Go client libraries (typically recent versions).")
-    click.echo("   - Consider updating scipfs: 'pip install --upgrade scipfs'.")
-
-    click.echo("\n--- 'availability' Command Check (via Go Wrapper - Conceptual) ---")
-    click.echo("The 'availability' command will rely on the Go wrapper's dht.findprovs implementation.")
-    click.echo("To test this part of the Go wrapper, you would typically execute a findprovs call via it.")
+    click.echo(f"1. Ensure the SciPFS Go Helper ('{ipfs_client.go_wrapper_executable_name if ipfs_client else IPFSClient.go_wrapper_executable_name}') is built and functional:")
+    click.echo("   Run: ./build_go_wrapper.sh from the project root.")
+    click.echo(f"2. Ensure your IPFS (Kubo) daemon is version {REQUIRED_IPFS_KUBO_VERSION_STR} or newer, and is running.")
+    click.echo("   - Check version: ipfs version")
+    click.echo("   - Download/update Kubo: https://dist.ipfs.tech/#kubo or https://github.com/ipfs/kubo/releases")
+    click.echo("3. Verify IPFS API is accessible (default: /ip4/127.0.0.1/tcp/5001). Check your IPFS config if different.")
+    click.echo("4. If issues persist, consider reinstalling/updating scipfs: 'pip install --upgrade scipfs'")
+    # Removed the conceptual availability check section as it was too vague.
 
     click.echo("\nDoctor check complete.")
 

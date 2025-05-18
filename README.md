@@ -132,8 +132,10 @@ ipfs daemon
 SciPFS now exclusively uses a custom Go program (`scipfs_go_helper`) to communicate with your IPFS daemon. This approach replaces the previous Python-based `ipfshttpclient` library.
 
 - **Go Helper (`scipfs_go_helper`)**: This executable is crucial for all IPFS operations within SciPFS. You must build it from the provided Go source code (`scipfs_go_wrapper.go`) using the `./build_go_wrapper.sh` script after cloning the repository. Ensure this helper is in your PATH or the current working directory when running `scipfs`.
-- **Kubo (IPFS Daemon) Compatibility**: The `scipfs_go_helper` interacts with your IPFS daemon (typically Kubo, formerly go-ipfs) via its HTTP API. For best results, ensure your Kubo daemon is up-to-date and running correctly. While specific version incompatibilities are less of a direct concern for SciPFS itself (as it now depends on the Go helper), the Go helper relies on standard IPFS API interactions. Significant breakage in the IPFS API by very old or experimental Kubo versions could still pose issues.
-- **Recommendation**: Keep your Kubo daemon updated to a recent stable release. If you encounter issues, verify that `scipfs_go_helper` is built correctly and that your IPFS daemon is operational and its API (`/ip4/127.0.0.1/tcp/5001` by default) is accessible.
+- **Kubo (IPFS Daemon) Compatibility**: The `scipfs_go_helper` interacts with your IPFS daemon (typically Kubo, formerly go-ipfs) via its HTTP API.
+    - **Required Version**: SciPFS requires **Kubo version 0.34.1 or newer**. The `scipfs_go_helper` will perform a version check upon startup and will exit with an error if an older, incompatible version of Kubo is detected.
+    - **Recommendation**: Keep your Kubo daemon updated to version 0.34.1 or a more recent stable release. If you encounter issues, verify that `scipfs_go_helper` is built correctly, that your IPFS daemon is operational, its API (`/ip4/127.0.0.1/tcp/5001` by default) is accessible, and its version meets the requirement.
+- **Why this check?** This ensures that `scipfs` can reliably use IPFS commands and flags (like `ipfs routing findprovs --num-providers`) that might have changed or been introduced in specific versions.
 
 ### Client Implementation Status
 

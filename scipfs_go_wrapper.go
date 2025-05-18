@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ type IDResponse struct {
 }
 
 const WrapperVersion = "0.1.0" // Define the wrapper version
+const RequiredIPFSVersion = "0.34.1"
 
 func printJSONResponse(success bool, errorMsg string, data interface{}) {
 	resp := CommandResponse{
@@ -60,6 +62,86 @@ func printJSONResponse(success bool, errorMsg string, data interface{}) {
 		fmt.Fprintln(os.Stderr, string(jsonBytes)) // Print actual error to stderr
 		os.Exit(1) // Exit with error code
 	}
+}
+
+// compareVersions returns true if version1 is less than version2
+func compareVersions(version1Str, version2Str string) (bool, error) {
+	parseVer := func(vStr string) ([]int, error) {
+		parts := strings.Split(strings.TrimSpace(vStr), ".")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("invalid version format: %s, expected X.Y.Z", vStr)
+		}
+		var_int_parts := make([]int, 3)
+		for i, p := range parts {
+			val, err := strconv.Atoi(p)
+			if err != nil {
+				return nil, fmt.Errorf("non-integer part in version %s: %s", vStr, p)
+			}
+			var_int_parts[i] = val
+		}
+		return var_int_parts, nil
+	}
+
+	v1, err := parseVer(version1Str)
+	if err != nil {
+		return false, fmt.Errorf("could not parse version1 ('%s'): %w", version1Str, err)
+	}
+	v2, err := parseVer(version2Str)
+	if err != nil {
+		return false, fmt.Errorf("could not parse version2 ('%s'): %w", version2Str, err)
+	}
+
+	if v1[0] < v2[0] { // Major
+		return true, nil
+	}
+	if v1[0] > v2[0] {
+		return false, nil
+	}
+	// Major versions are equal, compare minor
+	if v1[1] < v2[1] { // Minor
+		return true, nil
+	}
+	if v1[1] > v2[1] {
+		return false, nil
+	}
+	// Minor versions are equal, compare patch
+	if v1[2] < v2[2] { // Patch
+		return true, nil
+	}
+	return false, nil // v1 is equal or greater
+}
+
+func checkIPFSVersion() error {
+	cmd := exec.Command("ipfs", "version", "--number")
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to execute 'ipfs version --number': %w. Stderr: %s", err, stderr.String())
+	}
+
+	installedVersion := strings.TrimSpace(out.String())
+	if installedVersion == "" {
+		return fmt.Errorf("'ipfs version --number' returned empty output. Stderr: %s", stderr.String())
+	}
+	
+	// Handle potential "v" prefix, e.g. "v0.34.1"
+	installedVersion = strings.TrimPrefix(installedVersion, "v")
+
+
+	isOlder, err := compareVersions(installedVersion, RequiredIPFSVersion)
+	if err != nil {
+		return fmt.Errorf("failed to compare IPFS versions (installed: '%s', required: '%s'): %w", installedVersion, RequiredIPFSVersion, err)
+	}
+
+	if isOlder {
+		return fmt.Errorf("installed IPFS version '%s' is older than required version '%s'. Please upgrade your IPFS (Kubo) daemon/CLI to %s or newer", installedVersion, RequiredIPFSVersion, RequiredIPFSVersion)
+	}
+	// fmt.Fprintf(os.Stderr, "Debug: IPFS version check passed. Installed: %s, Required: %s\n", installedVersion, RequiredIPFSVersion) // Optional debug
+	return nil
 }
 
 func main() {
@@ -91,6 +173,24 @@ func main() {
 		// No subcommand found after global flags (or no args at all other than flags)
 		printJSONResponse(false, "Subcommand required after global flags (e.g., version, pin, add_file)", nil)
 		return
+	}
+
+	// --- IPFS Version Check ---
+	// Perform this check early, before trying to connect or use specific subcommands
+	// unless the subcommand is 'version' itself for the wrapper.
+	nonFlagArgsForVersionCheck := globalFlags.Args()
+	performVersionCheck := true
+	if len(nonFlagArgsForVersionCheck) > 0 && nonFlagArgsForVersionCheck[0] == "version" {
+		// Don't run IPFS version check if the command IS to get the wrapper's version
+		performVersionCheck = false
+	}
+
+	if performVersionCheck {
+		err = checkIPFSVersion()
+		if err != nil {
+			printJSONResponse(false, fmt.Sprintf("IPFS Version Check Failed: %s", err.Error()), nil)
+			return // Exit if version check fails
+		}
 	}
 
 	// --- IPFS Node Connection ---
