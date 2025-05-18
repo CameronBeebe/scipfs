@@ -723,10 +723,10 @@ func main() {
 			return
 		}
 
-		// Command: ipfs dht findprovs <cid> --num-providers=<val>
+		// Command: ipfs routing findprovs --num-providers=<val> <cid>
 		// The timeout for the dht walk itself is managed by the ipfs daemon.
 		// The timeout in the Python client will be for the execution of this Go helper process.
-		cmd := exec.Command("ipfs", "dht", "findprovs", fmt.Sprintf("--num-providers=%d", *numProviders), *cidStr)
+		cmd := exec.Command("ipfs", "routing", "findprovs", fmt.Sprintf("--num-providers=%d", *numProviders), *cidStr)
 
 		var stdout bytes.Buffer
 		var stderr bytes.Buffer
@@ -737,7 +737,7 @@ func main() {
 		// `ipfs dht findprovs` can exit 0 even if no providers are found, printing nothing or just a newline.
 		// It exits non-zero for actual errors (e.g. routing error, CID format error before it even starts).
 		if err != nil {
-			errMsg := fmt.Sprintf("Error executing 'ipfs dht findprovs %s': %s", *cidStr, err.Error())
+			errMsg := fmt.Sprintf("Error executing 'ipfs routing findprovs %s': %s", *cidStr, err.Error())
 			if stderr.Len() > 0 {
 				errMsg += fmt.Sprintf(" | IPFS Stderr: %s", stderr.String())
 			}

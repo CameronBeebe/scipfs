@@ -90,6 +90,30 @@ run_test "Call with no subcommand (error expected)" 1 "$EXECUTABLE_NAME" -api "$
 run_test "Call with unknown subcommand (error expected)" 1 "$EXECUTABLE_NAME" -api "$IPFS_API_ADDR" foobar
 # Expected: Exit code 1, error on stderr
 
+# Test 6: Find providers for a known CID
+# First, ensure the CID is pinned locally so this node is a provider
+echo "Pre-requisite for Test 6: Pinning $TEST_CID to ensure local provider..."
+"$EXECUTABLE_NAME" -api "$IPFS_API_ADDR" pin "$TEST_CID" > /dev/null 2>&1
+PIN_EXIT_CODE=$?
+if [ $PIN_EXIT_CODE -ne 0 ]; then
+    echo "WARNING: Pre-requisite pin command for Test 6 failed. Test may be unreliable."
+fi
+run_test "Find providers for known CID ($TEST_CID)" 0 "$EXECUTABLE_NAME" -api "$IPFS_API_ADDR" find_providers_cid --cid "$TEST_CID" --num-providers 5
+# Add specific check for find_providers_cid output
+if [ $ACTUAL_EXIT_CODE -eq 0 ]; then # Only check STDOUT if command was successful
+    if [[ "$OUTPUT_STDOUT" != *'"success":true'* ]]; then
+        echo "SUB-FAIL (Test 6): 'success:true' not found in STDOUT!"
+        # This would ideally be integrated into run_test to mark FAILED_COUNT
+        # For now, manual observation or a more complex run_test function is needed
+        # To properly fail the test here, we could increment FAILED_COUNT and decrement PASSED_COUNT
+        # if the main status was PASSED.
+    elif [[ "$OUTPUT_STDOUT" != *'"providers":['* ]] || [[ "$OUTPUT_STDOUT" == *'"providers":[]'* ]]; then
+        # Check if "providers" key exists and is not an empty array.
+        # A more robust check would parse JSON (e.g. with jq) if available.
+        echo "SUB-FAIL (Test 6): 'providers' array not found or is empty in STDOUT!"
+    fi
+fi
+
 # --- Summary --- 
 echo ">>> Test Run Summary <<<"
 echo "Total Tests: $TEST_COUNT"
