@@ -288,5 +288,280 @@ class TestSciPFSCLI(unittest.TestCase):
         self.assertIn("Old Manifest CID: QmOldCID", result.output)
         self.assertIn("New Manifest CID: QmNewCIDFromIPNS", result.output)
 
+    # Test for scipfs config set username
+    @patch('scipfs.cli.scipfs_config_instance.set_username')
+    def test_config_set_username_success(self, mock_set_username):
+        result = self.runner.invoke(scipfs_cli.cli, ['config', 'set', 'username', 'newuser'])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_set_username.assert_called_once_with('newuser')
+        self.assertIn("Username set to: newuser", result.output)
+
+    @patch('scipfs.cli.scipfs_config_instance.set_username')
+    def test_config_set_username_too_short(self, mock_set_username):
+        result = self.runner.invoke(scipfs_cli.cli, ['config', 'set', 'username', 'nu'])
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Error: Username must be at least 3 characters long.", result.output)
+        mock_set_username.assert_not_called()
+
+    # --- Tests for 'scipfs pin cid <CID>' ---
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_cid_success(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        test_cid = "QmTestCIDForPinning"
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'cid', test_cid])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.pin.assert_called_once_with(test_cid)
+        self.assertIn(f"Attempting to pin CID: {test_cid}...", result.output)
+        self.assertIn(f"Successfully pinned CID: {test_cid}.", result.output)
+
+    def test_pin_cid_invalid_format(self):
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'cid', 'invalidcidformat'])
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Error: Invalid CID format: invalidcidformat", result.output)
+
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_cid_ipfs_connection_error(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_ipfs_instance.pin.side_effect = ConnectionError("Failed to connect to IPFS daemon")
+        test_cid = "QmValidCID"
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'cid', test_cid])
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn(f"Error connecting to IPFS node: Failed to connect to IPFS daemon", result.output)
+
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_cid_ipfs_runtime_error(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_ipfs_instance.pin.side_effect = RuntimeError("IPFS pin command failed internally")
+        test_cid = "QmAnotherValidCID"
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'cid', test_cid])
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn(f"Error pinning CID {test_cid}: IPFS pin command failed internally", result.output)
+
+    # --- Tests for 'scipfs pin library <LIBRARY_NAME>' ---
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_success(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+
+        mock_library_instance.name = "pinlib"
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.manifest_cid = "QmPinManifestCID"
+        mock_files = [
+            {'name': 'file1.txt', 'cid': 'QmFile1CID'},
+            {'name': 'file2.pdf', 'cid': 'QmFile2CID'}
+        ]
+        mock_library_instance.list_files.return_value = mock_files
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'pinlib'])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        MockLibrary.assert_called_once_with("pinlib", TEST_CONFIG_DIR, mock_ipfs_instance)
+        self.assertIn("Pinning library: pinlib", result.output)
+        self.assertIn(f"Attempting to pin manifest CID: {mock_library_instance.manifest_cid}...", result.output)
+        self.assertIn(f"Attempting to pin file 'file1.txt' (CID: QmFile1CID)...", result.output)
+        self.assertIn(f"Attempting to pin file 'file2.pdf' (CID: QmFile2CID)...", result.output)
+        self.assertIn("Successfully pinned items: 3", result.output) # Manifest + 2 files
+        
+        expected_pin_calls = [
+            unittest.mock.call(mock_library_instance.manifest_cid),
+            unittest.mock.call('QmFile1CID'),
+            unittest.mock.call('QmFile2CID')
+        ]
+        mock_ipfs_instance.pin.assert_has_calls(expected_pin_calls, any_order=False)
+        self.assertEqual(mock_ipfs_instance.pin.call_count, 3)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_not_found(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+        mock_library_instance.manifest_path.exists.return_value = False
+        # Configure manifest_path to have a __str__ representation for the error message
+        mock_library_instance.manifest_path.__str__.return_value = str(TEST_CONFIG_DIR / "nonexistent_manifest.json")
+
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'nonexistent'])
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Error: Local manifest for library 'nonexistent' not found", result.output)
+        mock_ipfs_instance.pin.assert_not_called()
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_empty_manifest_no_files(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+
+        mock_library_instance.name = "emptylib"
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.manifest_cid = "QmEmptyManifestCID" # Has a manifest CID
+        mock_library_instance.list_files.return_value = [] # No files
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'emptylib'])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.pin.assert_called_once_with("QmEmptyManifestCID")
+        self.assertIn("No files found in the library manifest to pin.", result.output)
+        self.assertIn("Successfully pinned items: 1", result.output)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_no_manifest_cid(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+
+        mock_library_instance.name = "nomanifestcidlib"
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.manifest_cid = None # No manifest CID
+        mock_library_instance.list_files.return_value = []
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'nomanifestcidlib'])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.pin.assert_not_called() # Should not try to pin None
+        self.assertIn("Warning: Library manifest CID not found or is empty. Cannot pin manifest.", result.output)
+        self.assertIn("Successfully pinned items: 0", result.output)
+
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_file_missing_cid(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+
+        mock_library_instance.name = "missingcidlib"
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.manifest_cid = "QmManifestWithMissingFileCID"
+        mock_files = [
+            {'name': 'goodfile.txt', 'cid': 'QmGoodFileCID'},
+            {'name': 'badfile.dat'} # Missing CID
+        ]
+        mock_library_instance.list_files.return_value = mock_files
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'missingcidlib'])
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        expected_pin_calls = [
+            unittest.mock.call("QmManifestWithMissingFileCID"),
+            unittest.mock.call('QmGoodFileCID')
+        ]
+        mock_ipfs_instance.pin.assert_has_calls(expected_pin_calls, any_order=False)
+        self.assertEqual(mock_ipfs_instance.pin.call_count, 2)
+        self.assertIn("Warning: CID not found for file 'badfile.dat' in manifest. Skipping.", result.output)
+        self.assertIn("Successfully pinned items: 2", result.output)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_library_pinning_error_for_one_file(self, MockIPFSClient, MockLibrary):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        mock_library_instance = MockLibrary.return_value
+
+        mock_library_instance.name = "partialpinlib"
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.manifest_cid = "QmPartialManifest"
+        mock_files = [
+            {'name': 'file1.txt', 'cid': 'QmFile1ToPin'},
+            {'name': 'file_to_fail.txt', 'cid': 'QmFileToFailPinning'},
+            {'name': 'file3.txt', 'cid': 'QmFile3ToPin'}
+        ]
+        mock_library_instance.list_files.return_value = mock_files
+
+        # Simulate error only for 'QmFileToFailPinning'
+        def pin_side_effect(cid_to_pin):
+            if cid_to_pin == 'QmFileToFailPinning':
+                raise RuntimeError("Simulated pin failure for specific CID")
+            return None # Successful pin for others
+        mock_ipfs_instance.pin.side_effect = pin_side_effect
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'library', 'partialpinlib'])
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output) # Should exit with error due to one failure
+        self.assertIn("Error pinning file 'file_to_fail.txt' (CID: QmFileToFailPinning): Simulated pin failure", result.output)
+        self.assertIn("Successfully pinned items: 3", result.output) # Manifest + file1 + file3 were successful
+        self.assertIn("Errors encountered while pinning items: 1", result.output)
+        
+        expected_pin_calls = [
+            unittest.mock.call("QmPartialManifest"),
+            unittest.mock.call('QmFile1ToPin'),
+            unittest.mock.call('QmFileToFailPinning'), # This one was attempted
+            unittest.mock.call('QmFile3ToPin')
+        ]
+        mock_ipfs_instance.pin.assert_has_calls(expected_pin_calls, any_order=False)
+        self.assertEqual(mock_ipfs_instance.pin.call_count, 4) # All 4 were attempted
+
+    # --- Tests for 'scipfs pin file <FILE_PATH>' ---
+    @patch('scipfs.cli.IPFSClient')
+    # Removed pathlib.Path.exists and is_file mocks as we'll create a real temp file
+    def test_pin_file_success(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        dummy_file_path_obj = TEST_CONFIG_DIR / "dummy_to_pin.txt" # Use a path in test config dir
+        expected_cid = "QmDummyFileCID"
+
+        # Create dummy file for the test
+        with open(dummy_file_path_obj, "w") as f:
+            f.write("test pin content")
+
+        mock_ipfs_instance.add_file.return_value = expected_cid
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'file', str(dummy_file_path_obj)])
+        
+        dummy_file_path_obj.unlink() # Clean up dummy file
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.add_file.assert_called_once_with(dummy_file_path_obj)
+        mock_ipfs_instance.pin.assert_called_once_with(expected_cid)
+        self.assertIn(f"Adding file '{dummy_file_path_obj}' to IPFS to get its CID...", result.output)
+        self.assertIn(f"File added to IPFS. CID: {expected_cid}", result.output)
+        self.assertIn(f"Attempting to pin CID: {expected_cid}...", result.output)
+        self.assertIn(f"Successfully pinned file '{dummy_file_path_obj}' (CID: {expected_cid}).", result.output)
+
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_file_add_error(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        dummy_file_path_obj = TEST_CONFIG_DIR / "dummy_add_fail.txt"
+
+        with open(dummy_file_path_obj, "w") as f:
+            f.write("test add fail content")
+
+        mock_ipfs_instance.add_file.side_effect = RuntimeError("Failed to add file to IPFS")
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'file', str(dummy_file_path_obj)])
+        
+        dummy_file_path_obj.unlink()
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.add_file.assert_called_once_with(dummy_file_path_obj)
+        mock_ipfs_instance.pin.assert_not_called()
+        self.assertIn(f"Error processing file {dummy_file_path_obj}: Failed to add file to IPFS", result.output)
+
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_file_pin_error_after_add(self, MockIPFSClient):
+        mock_ipfs_instance = MockIPFSClient.return_value
+        dummy_file_path_obj = TEST_CONFIG_DIR / "dummy_pin_fail.txt"
+        expected_cid = "QmAnotherDummyCID"
+
+        with open(dummy_file_path_obj, "w") as f:
+            f.write("test pin fail content")
+
+        mock_ipfs_instance.add_file.return_value = expected_cid
+        mock_ipfs_instance.pin.side_effect = RuntimeError("Failed to pin CID on IPFS")
+
+        result = self.runner.invoke(scipfs_cli.cli, ['pin', 'file', str(dummy_file_path_obj)])
+        
+        dummy_file_path_obj.unlink()
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        mock_ipfs_instance.add_file.assert_called_once_with(dummy_file_path_obj)
+        mock_ipfs_instance.pin.assert_called_once_with(expected_cid)
+        self.assertIn(f"File added to IPFS. CID: {expected_cid}", result.output) # Add was successful
+        self.assertIn(f"Error processing file {dummy_file_path_obj}: Failed to pin CID on IPFS", result.output)
+
 if __name__ == '__main__':
     unittest.main() 

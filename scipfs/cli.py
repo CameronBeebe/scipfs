@@ -612,6 +612,160 @@ def set_username_cmd(username: str):
         click.echo(f"Error setting username: {e}", err=True)
         sys.exit(1)
 
+@config_set.command("autocompletion")
+@click.argument("value", type=click.BOOL)
+def set_autocompletion_cmd(value: bool):
+    # Delegate to the SciPFSConfig instance
+    scipfs_config_instance.set_autocompletion(value)
+
+# New Pin Command Group
+@cli.group()
+def pin():
+    """Pin CIDs or entire libraries to the local IPFS node."""
+    pass
+
+@pin.command(name="cid")
+@click.argument("cid_string")
+def pin_cid(cid_string: str):
+    """Pin a specific IPFS Content Identifier (CID)."""
+    try:
+        # Basic CID validation
+        if not (cid_string.startswith("Qm") or cid_string.startswith("bafy") or cid_string.startswith("bafk") or cid_string.startswith("baga")): # Added baga for car files
+            click.echo(f"Error: Invalid CID format: {cid_string}", err=True)
+            sys.exit(1)
+
+        ipfs_client = IPFSClient()
+        click.echo(f"Attempting to pin CID: {cid_string}...")
+        ipfs_client.pin(cid_string) # This call is blocking and will raise on error
+        click.echo(f"Successfully pinned CID: {cid_string}.")
+    except SciPFSGoWrapperError as e: # Catch specific wrapper errors
+        click.echo(f"Error interacting with IPFS (Go wrapper): {e}", err=True)
+        sys.exit(1)
+    except FileNotFoundError as e: 
+         click.echo(f"Error: IPFS Go wrapper issue or file not found. {e}", err=True)
+         sys.exit(1)
+    except ConnectionError as e:
+        click.echo(f"Error connecting to IPFS node: {e}", err=True)
+        sys.exit(1)
+    except RuntimeError as e: 
+        click.echo(f"Error pinning CID {cid_string}: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred: {e}", err=True)
+        sys.exit(1)
+
+@pin.command(name="file")
+@click.argument("file_path", type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path))
+def pin_file(file_path: Path):
+    """Add a local file to IPFS and pin its CID."""
+    try:
+        ipfs_client = IPFSClient()
+        click.echo(f"Adding file '{file_path}' to IPFS to get its CID...")
+        # add_file internally handles FileNotFoundError for file_path not being a file
+        # but click.Path(exists=True, dir_okay=False) should catch most issues upstream.
+        file_cid = ipfs_client.add_file(file_path)
+        click.echo(f"File added to IPFS. CID: {file_cid}")
+        
+        click.echo(f"Attempting to pin CID: {file_cid}...")
+        ipfs_client.pin(file_cid)
+        click.echo(f"Successfully pinned file '{file_path}' (CID: {file_cid}).")
+
+    except FileNotFoundError as e: # Should be caught by click.Path, but as a fallback for add_file
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except SciPFSGoWrapperError as e: # Catch specific wrapper errors from add_file or pin
+        click.echo(f"Error interacting with IPFS (Go wrapper): {e}", err=True)
+        sys.exit(1)
+    except ConnectionError as e:
+        click.echo(f"Error connecting to IPFS node: {e}", err=True)
+        sys.exit(1)
+    except RuntimeError as e: # From add_file or pin
+        click.echo(f"Error processing file {file_path}: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred while pinning file '{file_path}': {e}", err=True)
+        sys.exit(1)
+
+@pin.command(name="library")
+@click.argument("library_name")
+def pin_library(library_name: str):
+    """Pin all files and the manifest of a specified library."""
+    try:
+        ipfs_client = IPFSClient()
+        # Use the library_name from argument, CONFIG_DIR is globally defined
+        library = Library(library_name, CONFIG_DIR, ipfs_client) 
+
+        if not library.manifest_path.exists():
+            click.echo(f"Error: Local manifest for library '{library_name}' not found at {library.manifest_path}.", err=True)
+            click.echo(f"Hint: Did you 'create' or 'join' the library '{library_name}' first?", err=True)
+            sys.exit(1)
+
+        click.echo(f"Pinning library: {library_name} (from local manifest)")
+
+        pinned_items_count = 0
+        error_items_count = 0
+        
+        # 1. Pin the manifest itself
+        manifest_cid = library.manifest_cid
+        if manifest_cid:
+            try:
+                click.echo(f"  Attempting to pin manifest CID: {manifest_cid}...")
+                ipfs_client.pin(manifest_cid)
+                click.echo(f"  Successfully pinned manifest CID: {manifest_cid}.")
+                pinned_items_count += 1
+            except Exception as e_manifest:
+                click.echo(f"  Error pinning manifest CID {manifest_cid}: {e_manifest}", err=True)
+                error_items_count += 1
+        else:
+            click.echo("  Warning: Library manifest CID not found or is empty. Cannot pin manifest.", err=True)
+            # Not necessarily an error for the command to exit, but good to note.
+
+        # 2. Pin all files in the manifest
+        files_in_manifest = library.list_files()
+        if not files_in_manifest:
+            click.echo("  No files found in the library manifest to pin.")
+        else:
+            click.echo(f"  Found {len(files_in_manifest)} file(s) in manifest. Attempting to pin...")
+            for file_info in files_in_manifest:
+                file_cid = file_info.get('cid')
+                file_name = file_info.get('name', 'Unknown file') # Default if name is missing
+                if file_cid:
+                    try:
+                        click.echo(f"    Attempting to pin file '{file_name}' (CID: {file_cid})...")
+                        ipfs_client.pin(file_cid)
+                        click.echo(f"    Successfully pinned file '{file_name}' (CID: {file_cid}).")
+                        pinned_items_count += 1
+                    except Exception as e_file: # Catching general exception as ipfs_client.pin can raise various things
+                        click.echo(f"    Error pinning file '{file_name}' (CID: {file_cid}): {e_file}", err=True)
+                        error_items_count += 1
+                else:
+                    click.echo(f"    Warning: CID not found for file '{file_name}' in manifest. Skipping.", err=True)
+        
+        click.echo(f"\nPinning operation for library '{library_name}' complete.")
+        click.echo(f"  Successfully pinned items: {pinned_items_count}")
+        if error_items_count > 0:
+            click.echo(f"  Errors encountered while pinning items: {error_items_count}", err=True)
+            sys.exit(1) # Exit with error if any item failed to pin
+
+    except FileNotFoundError as e: 
+         click.echo(f"Error: {e}", err=True) 
+         sys.exit(1)
+    except SciPFSGoWrapperError as e: # Catch specific wrapper errors
+        click.echo(f"Error interacting with IPFS (Go wrapper): {e}", err=True)
+        sys.exit(1)
+    except ConnectionError as e:
+        click.echo(f"Error connecting to IPFS node: {e}", err=True)
+        sys.exit(1)
+    except ValueError as e: # From Library init if manifest is malformed for example
+        click.echo(f"Error processing library '{library_name}': {e}", err=True)
+        sys.exit(1)
+    except RuntimeError as e: 
+        click.echo(f"Runtime error processing library {library_name}: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred during 'pin library {library_name}': {e}", err=True)
+        sys.exit(1)
+
 @cli.command(name="list-pinned")
 def list_pinned_cmd():
     """List files from local SciPFS libraries that are pinned on the IPFS node.
