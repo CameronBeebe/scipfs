@@ -599,29 +599,24 @@ def config_set():
 @config_set.command("username")
 @click.argument("username")
 def set_username_cmd(username: str):
-    """Set the username to be associated with file additions."""
+    """Set the username for adding files. This is stored locally."""
     try:
-        # Basic validation (optional, can be expanded)
-        if not username or len(username) < 3:
-             click.echo("Error: Username must be at least 3 characters long.", err=True)
-             sys.exit(1)
-        
         scipfs_config_instance.set_username(username)
         click.echo(f"Username set to: {username}")
-    except Exception as e:
-        click.echo(f"Error setting username: {e}", err=True)
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
         sys.exit(1)
-
-@config_set.command("autocompletion")
-@click.argument("value", type=click.BOOL)
-def set_autocompletion_cmd(value: bool):
-    # Delegate to the SciPFSConfig instance
-    scipfs_config_instance.set_autocompletion(value)
+    except Exception as e:
+        click.echo(f"An unexpected error occurred: {e}", err=True)
+        sys.exit(1)
 
 # New Pin Command Group
 @cli.group()
 def pin():
-    """Pin CIDs or entire libraries to the local IPFS node."""
+    """Manage pinned CIDs on the local IPFS node.
+
+    This command group provides options to pin specific CIDs or entire libraries to the local IPFS node.
+    """
     pass
 
 @pin.command(name="cid")

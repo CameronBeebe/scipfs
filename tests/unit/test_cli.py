@@ -298,10 +298,24 @@ class TestSciPFSCLI(unittest.TestCase):
 
     @patch('scipfs.cli.scipfs_config_instance.set_username')
     def test_config_set_username_too_short(self, mock_set_username):
+        # Configure the mock to simulate the ValueError for short usernames
+        def side_effect_for_set_username(username_val):
+            if len(username_val) < 3:
+                raise ValueError("Username must be at least 3 characters long.")
+            # For other cases, you might not need to do anything or could return a value
+            # if the original method returned something and it was used.
+
+        mock_set_username.side_effect = side_effect_for_set_username
         result = self.runner.invoke(scipfs_cli.cli, ['config', 'set', 'username', 'nu'])
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Error: Username must be at least 3 characters long.", result.output)
-        mock_set_username.assert_not_called()
+
+    @patch('scipfs.cli.scipfs_config_instance.set_username')
+    def test_config_set_username_valid(self, mock_set_username):
+        result = self.runner.invoke(scipfs_cli.cli, ['config', 'set', 'username', 'validuser'])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        mock_set_username.assert_called_once_with('validuser')
+        self.assertIn("Username set to: validuser", result.output)
 
     # --- Tests for 'scipfs pin cid <CID>' ---
     @patch('scipfs.cli.IPFSClient')

@@ -27,11 +27,10 @@
    - [Viewing Library Info](#viewing-library-info)
    - [Listing Local Libraries](#listing-local-libraries)
    - [Listing Pinned Library Files](#listing-pinned-library-files)
-   - [Enabling Shell Autocompletion (Recommended)](#enabling-shell-autocompletion-recommended)
 5. [Group Coordination (via IPNS)](#group-coordination-via-ipns)
    - [Sharing the Library (via IPNS Name)](#sharing-the-library-via-ipns-name)
    - [How Library Updates Work](#how-library-updates-work)
-   - [Pinning CIDs for Availability](#pinning-cids-for-availability)
+   - [Pinning Content for Availability](#pinning-content-for-availability)
 6. [Running Tests](#running-tests)
 7. [Debugging Common Issues](#debugging-common-issues)
    - [Can't Connect to IPFS Node](#cant-connect-to-ipfs-node)
@@ -217,6 +216,8 @@ scipfs create my-shared-docs
 # Successfully created library 'my-shared-docs'.
 # IPNS Name (share this with others): /ipns/k51qkz0x...
 # Initial Manifest CID: QmYp...
+# Your local IPFS node is now publishing this library at the IPNS name.
+# Note: IPNS propagation can take some time.
 ```
 
 ### Adding Files to a Library
@@ -344,30 +345,21 @@ scipfs info <library_name>
 To list all local libraries:
 
 ```bash
-scipfs list --local
+scipfs list-local
 ```
 
 - Displays names and IPNS names of all local libraries.
 
 ### Listing Pinned Library Files
 
-To list all files in all pinned libraries:
+To list all files whose CIDs are pinned locally across all your SciPFS libraries:
 
 ```bash
-scipfs list --pinned
+scipfs list-pinned
 ```
 
-- Displays names, CIDs, and sizes of all files in all pinned libraries.
-
-### Enabling Shell Autocompletion (Recommended)
-
-To enable shell autocompletion for SciPFS commands:
-
-```bash
-scipfs config set autocompletion true
-```
-
-- This will enable autocompletion for SciPFS commands in your shell.
+- Displays names, CIDs, and sizes of files from your libraries that are currently pinned in your local IPFS node.
+- Note: This checks the CIDs of files listed in your local library manifests against the CIDs reported as pinned by your IPFS node.
 
 ---
 
@@ -375,39 +367,46 @@ scipfs config set autocompletion true
 
 ### Sharing the Library (via IPNS Name)
 
-To share a library with others, you need to publish its IPNS name. This allows others to join and get updates to the library.
+When you create a library using `scipfs create <library_name>`, an IPNS key is generated, and the library is automatically published to an IPNS name derived from this key. This IPNS name (e.g., `/ipns/k51q...`) is shown in the output and is the primary identifier you should share with others so they can join and follow your library.
 
-```bash
-scipfs publish <library_name>
-```
-- `<library_name>`: The name of the library to publish.
-- This command:
-    1. Generates a new IPNS key pair for the library.
-    2. Publishes the library's manifest CID to the new IPNS name.
-- The command will output the new IPNS name. **The IPNS name is what you share with others so they can join your library.**
-
-Example:
-```bash
-scipfs publish my-shared-docs
-# Output might include:
-# Successfully published library 'my-shared-docs' to IPNS name: /ipns/k51qkz0x...
-```
+There is no separate `scipfs publish` command; publishing is an integral part of library creation and updates made by the library owner.
 
 ### How Library Updates Work
 
 When the library owner adds files, the manifest changes (getting a new CID), and SciPFS automatically republishes this new manifest CID to the same IPNS name.
 
-### Pinning CIDs for Availability
+### Pinning Content for Availability
 
-To pin a CID for availability, you can use the `scipfs pin` command:
+Pinning content to your local IPFS node helps ensure its availability to you and others on the network, even if the original provider goes offline. SciPFS provides several ways to pin content:
 
-```bash
-scipfs pin <cid>
-```
-- `<cid>`: The CID to pin.
-- This command:
-    1. Pins the specified CID to your local IPFS node.
-    2. Ensures the CID is kept in your IPFS node's local storage.
+*   **Pin a specific CID:**
+    ```bash
+    scipfs pin cid <cid_string>
+    ```
+    -   `<cid_string>`: The Content ID to pin.
+
+*   **Pin a local file (adds and pins):**
+    This command will first add the file to IPFS (if not already added in the context of a library) and then pin its resulting CID.
+    ```bash
+    scipfs pin file <file_path>
+    ```
+    -   `<file_path>`: Path to the local file.
+
+*   **Pin all files in a library:**
+    This command iterates through all files in the specified library's manifest and pins each file's CID.
+    ```bash
+    scipfs pin library <library_name>
+    ```
+    -   `<library_name>`: The name of the library whose files you want to pin.
+
+*   **Pin during download:**
+    The `scipfs get` command also supports a `--pin` flag to pin files as they are downloaded:
+    ```bash
+    scipfs get <library_name> <file_name> --pin
+    scipfs get <library_name> --all --pin
+    ```
+
+Pinning ensures that the data corresponding to the CID is kept in your IPFS node's local storage.
 
 ---
 

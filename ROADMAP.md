@@ -15,68 +15,92 @@ Transform scipfs from a basic file-sharing tool into an intelligent library mana
 
 ---
 
+## Phase 0: Codebase Refinement & Robustness
+
+**Priority:** Critical (Before Phase 1)
+**Overall Feasibility:** High
+**Goal:** Strengthen the existing codebase to ensure stability, maintainability, and easier extension for future LLM features.
+
+### 0.1. Enhanced `IPFSClient` Robustness (`scipfs/ipfs.py`)
+**Description:** Improve the reliability and error handling of IPFS interactions.
+**Implementation Details:**
+- **Standardized Go Helper Error Handling:** Ensure all interactions with `scipfs_go_helper` have consistent error parsing (JSON error messages from Go), propagate errors as custom `SciPFSException` subtypes, and provide clear logging.
+- **Retry Mechanisms:** Implement basic retry logic with backoff for critical network-dependent IPFS operations (e.g., `publish_to_ipns`, `resolve_ipns_name`, `get_json`), especially for IPNS calls.
+- **Go Helper Health Check:** Consider a dedicated `check_health()` method in `IPFSClient` (callable by `scipfs doctor`) to verify Go helper and daemon status.
+**Feasibility:** High
+
+### 0.2. `Library` Class Refinements (`scipfs/library.py`)
+**Description:** Improve manifest management and the `add_file` process.
+**Implementation Details:**
+- **Manifest Versioning:** Introduce a `manifest_format_version` field (e.g., "1.0") within the manifest JSON itself. Update `_load_manifest` to check this version to handle future schema changes gracefully.
+- **Clearer `_save_manifest()` Separation (Consideration):** Evaluate if `_save_manifest()` needs more granular internal methods for scenarios like partial metadata updates (more relevant for async tasks later, but good to review).
+- **`add_file()` Transactionality & LLM Prep:** As `add_file` will be extended for text extraction and LLM processing, plan how to handle partial failures (e.g., file added to IPFS, but LLM step fails). The `llm_processing_status` field (planned for Phase 1) will be key here. Ensure the initial file addition remains robust.
+**Feasibility:** High
+
+### 0.3. Configuration Enhancements (`scipfs/config.py` & `scipfs/llm_config.py`)
+**Description:** Improve configuration management.
+**Implementation Details:**
+- **Typed Configuration (Consideration):** For `scipfs/config.py` and `scipfs/llm_config.py`, explore using Pydantic or similar for loading, validating, and accessing config options, especially as complexity grows.
+- **API Key Access Alignment:** Ensure `scipfs/config.py` (for user preferences like default provider/model) correctly interacts with `scipfs/llm_config.py` (which handles actual API key retrieval from env vars and provider-specifics).
+**Feasibility:** Medium (Pydantic is an added dependency if used)
+
+### 0.4. CLI Enhancements (`scipfs/cli.py`)
+**Description:** Improve user experience and utility of the CLI.
+**Implementation Details:**
+- **`scipfs file-info` Command:** Implement a new command `scipfs file-info <library_name> <file_name>` to display all currently stored metadata for a specific file (CID, size, adder, timestamp, and future LLM metadata).
+- **Consistent Output Styling:** Review and standardize CLI output for clarity and consistency, possibly using more of `click`'s styling features.
+- **`--yes` Flag (Consideration):** For commands that might involve significant changes or costs (like future LLM calls), consider adding a `--yes` flag to bypass interactive confirmations.
+**Feasibility:** High for `file-info` and styling; Medium for `--yes` flag logic if complex confirmations arise.
+
+### 0.5. Enhanced Logging
+**Description:** Improve logging for better debugging and monitoring.
+**Implementation Details:**
+- **Structured Logging (Consideration):** Explore outputting log entries in a structured format (e.g., JSON) for easier parsing by log management tools, especially for complex operations or background tasks.
+- **Contextual Logging:** Ensure log messages include relevant context (e.g., library name, file name, operation type) to facilitate easier tracing of operations.
+**Feasibility:** Medium
+
+### 0.6. Go Helper Refinements (`scipfs_go_wrapper.go`)
+**Description:** Ensure robustness of the Go helper component.
+**Implementation Details:**
+- **Input Sanitization/Validation:** Review and ensure robust handling of all inputs received from the Python layer (file paths, CIDs, key names).
+- **Structured JSON Error Reporting:** Verify that all error paths in the Go helper return well-formed JSON error messages to `stderr`, allowing `scipfs/ipfs.py` to parse them reliably and consistently.
+**Feasibility:** High
+
+---
+
 ## Phase 1: Foundational LLM Integration & Content Processing
 
 **Priority:** High  
 **Overall Feasibility:** High - Relies on well-established Python libraries and standard API integrations
+**Developer Notes:**
+- A separate `scipfs/llm_config.py` will be created to manage LLM provider details (API key env vars, default models) and global LLM call parameters (max tokens, temperature, etc.), keeping it distinct from `scipfs/config.py` which handles user/library settings.
+- Skeletons for `scipfs/text_extractor.py` and `scipfs/llm_utils.py` will be created as starting points.
+- The library manifest structure will require significant updates (see 1.5) to store new metadata like `extracted_text_cid`, `summary`, `tags`, and processing status.
+- A `manifest_format_version` field should be added to the manifest to help manage schema changes over time.
 
 ### 1.1. Configuration for LLM API Keys & Provider Choice
 
 **Description:** Securely manage LLM API keys and allow users to choose their preferred LLM provider and model.
+**Developer Note:** API Key management and provider choice will be handled by the new `scipfs/llm_config.py`. The main `scipfs/config.py` might store user *preferences* for default provider/model, which `llm_utils.py` would then use in conjunction with `llm_config.py`.
 
 #### Implementation Details
 
-**Files:** `scipfs/config.py`, `scipfs/cli.py`
+**Files:** `scipfs/config.py` (for user preferences), `scipfs/llm_config.py` (new, for provider details & API key access), `scipfs/cli.py`
 
 **Python Functionality:**
 
 - `SciPFSConfig` class in `config.py`:
-
-```python
-# scipfs/config.py (pseudocode)
-import os
-from typing import Optional
-
-class SciPFSConfig:
-    def __init__(self, config_path):
-        self.config_path = config_path
-        self.data = self._load_config()  # loads from ~/.scipfs/config.json
-
-    def _load_config(self) -> dict:
-        # Placeholder for actual loading logic
-        if os.path.exists(self.config_path):
-            # load and return dict
-            pass
-        return {}
-
-    def _save_config(self):
-        # Placeholder for actual saving logic
-        pass
-
-    def get_api_key(self, provider_name: str) -> Optional[str]:
-        env_var_name = f"SCIPFS_{provider_name.upper()}_API_KEY"
-        return os.environ.get(env_var_name)
-
-    def set_llm_provider(self, provider: str):
-        self.data['llm_provider'] = provider
-        self._save_config()
-
-    def get_llm_provider(self) -> Optional[str]:
-        return self.data.get('llm_provider')
-
-    def set_llm_model(self, model: str):
-        self.data['llm_model'] = model
-        self._save_config()
-    
-    def get_llm_model(self) -> Optional[str]:
-        return self.data.get('llm_model')
-```
-
+  - Methods to set/get user's preferred LLM provider and model (e.g., `set_user_default_llm_provider`, `get_user_default_llm_model`). These preferences are stored in `~/.scipfs/config.json`.
+- `GlobalLLMConfig` class in `llm_config.py` (new):
+  - Manages a list of known LLM providers (e.g., OpenAI, Anthropic).
+  - For each provider, defines how to get the API key (e.g., from `SCIPFS_OPENAI_API_KEY`).
+  - Stores default models for each provider, and global defaults for LLM call parameters (max_tokens, temperature).
+  - Provides methods like `get_api_key(provider_name)`, `get_model_for_task(provider_name, task_type)`.
 - New CLI commands in `cli.py` using `click`:
-  - `scipfs config set llm_provider <openai|anthropic|custom_url>`
-  - `scipfs config set llm_model <model_name_or_identifier>`
-  - `scipfs config get llm_provider`
-  - `scipfs config get llm_model`
+  - `scipfs config set default_llm_provider <openai|anthropic|custom_url>`
+  - `scipfs config set default_llm_model <model_name_or_identifier>` (perhaps per provider)
+  - `scipfs config get default_llm_provider`
+  - `scipfs config get default_llm_model`
 
 **Data:** API keys remain in environment variables. `~/.scipfs/config.json` stores provider choice and model.
 
@@ -96,7 +120,7 @@ class SciPFSConfig:
 
 #### Implementation Details
 
-**Files:** `scipfs/text_extractor.py` (new), `scipfs/library.py`
+**Files:** `scipfs/text_extractor.py` (new - skeleton created), `scipfs/library.py`
 
 **Python Functionality:**
 
@@ -152,7 +176,7 @@ def extract_text(file_path: Path) -> Optional[str]:
 
 #### Implementation Details
 
-**Files:** `scipfs/llm_utils.py` (new), `scipfs/library.py`
+**Files:** `scipfs/llm_utils.py` (new - skeleton created), `scipfs/library.py`, `scipfs/llm_config.py` (used by `llm_utils.py`)
 
 **Python Functionality:**
 
@@ -228,6 +252,7 @@ class LLMClient:
 ### 1.5. Manifest Structure & CLI Updates for New Metadata
 
 **Description:** Update manifest and CLI for new metadata.
+**Developer Note:** The manifest structure needs to accommodate CIDs for extracted text, summaries, tags, processing status, and potentially which LLM was used. A `manifest_format_version` field should be added.
 
 #### Implementation Details
 
@@ -243,11 +268,26 @@ class LLMClient:
         "added_by": "user_x",
         "added_timestamp": 1678886400,
         "original_file_type": ".pdf",
-        "extracted_text_cid": "QmText...", 
+        "extracted_text_cid": "QmText...",
         "summary": "This document discusses advanced techniques...",
         "tags": ["ai", "decentralization", "ipfs"],
-        "llm_processing_status": "completed", 
-        "bibtex_cid": "QmBibtex..." 
+        "llm_processing_status": "completed", // e.g., "pending", "failed_extraction", "failed_summary"
+        "llm_provider_info": {"provider": "openai", "model": "gpt-4o-mini"}, // Optional: record what generated the content
+        "bibtex_cid": "QmBibtex..."
+    }
+}
+```
+
+**Overall Manifest Structure:**
+```json
+{
+    "manifest_format_version": "1.1", // Or similar semantic version
+    "name": "my_library",
+    "ipns_name": "/ipns/...",
+    "ipns_key_name": "my_library",
+    "latest_manifest_cid": "QmCurrentManifest...",
+    "files": {
+        // ... file entries as above ...
     }
 }
 ```

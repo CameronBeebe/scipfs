@@ -70,6 +70,8 @@ class SciPFSConfig:
         """
         if not isinstance(username, str) or not username:
             raise ValueError("Username must be a non-empty string.")
+        if len(username) < 3:
+            raise ValueError("Username must be at least 3 characters long.")
         self.config_data["username"] = username
         self._save_config()
 
