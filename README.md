@@ -2,6 +2,8 @@
 
 **SciPFS** is a command-line tool designed to help small groups and communities manage decentralized file libraries on the InterPlanetary File System (IPFS). It allows users to create, join, and manage libraries of files (such as PDFs, text files, or other types) that are shared and hosted across the group.
 
+IN PROGRESS: We are adding LLM integration to use your API keys, with intelligent librarian, management, and other uses.
+
 ---
 
 ## Table of Contents
