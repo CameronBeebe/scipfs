@@ -82,3 +82,30 @@ scipfs_test_downloads_*/
 # Go build artifacts
 scipfs_go_helper
 scipfs_go_wrapper 
+
+# MyPy cache
+.mypy_cache/
+
+# Local configuration files that might contain secrets or local overrides
+local_*.py
+local_*.json
+local_*.yaml
+local_*.yml
+secret*.json
+secrets.py
+config/local.*
+
+# LLM related cache, data, or downloaded models (adjust if names differ)
+.llm_cache/
+llm_responses/
+llm_cache/
+.cache/
+models/
+downloaded_models/
+model_checkpoints/
+
+# Log files
+*.log
+logs/
+app.log
+debug.log 
