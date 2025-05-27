@@ -1,10 +1,13 @@
 import os
 from typing import Optional, Dict, Any
+import logging
 
 # Environment variable names for API keys
 # Example: SCIPFS_OPENAI_API_KEY, SCIPFS_ANTHROPIC_API_KEY
 ENV_VAR_PREFIX = "SCIPFS_"
 ENV_VAR_SUFFIX = "_API_KEY"
+
+logger = logging.getLogger(__name__)
 
 class LLMProviderConfig:
     """Configuration for a single LLM provider."""
@@ -19,7 +22,7 @@ class LLMProviderConfig:
         """Load API key from environment variable."""
         self.api_key = os.environ.get(self.api_key_env_var)
         if not self.api_key:
-            print(f"Warning: Environment variable {self.api_key_env_var} for {self.provider_name} API key not set.")
+            logger.warning(f"Environment variable {self.api_key_env_var} for {self.provider_name} API key not set.")
 
     def get_api_key(self) -> Optional[str]:
         return self.api_key
@@ -42,6 +45,7 @@ class GlobalLLMConfig:
         # Example:
         self.add_provider("openai", default_model="gpt-4o-mini")
         self.add_provider("anthropic", default_model="claude-3-haiku-20240307")
+        self.add_provider("groq", default_model="mixtral-8x7b-32768", api_key_env_var="SCIPFS_GROQ_API_KEY")
         # A 'custom_url' provider might need different handling for API key/URL
 
     def add_provider(self, provider_name: str, api_key_env_var: Optional[str] = None, default_model: Optional[str] = None):
@@ -59,7 +63,7 @@ class GlobalLLMConfig:
         if provider_name.lower() in self.providers:
             self.default_provider_name = provider_name.lower()
         else:
-            print(f"Warning: Provider {provider_name} not recognized. Cannot set as default.")
+            logger.warning(f"Provider {provider_name} not recognized. Cannot set as default.")
 
     def get_default_provider(self) -> Optional[LLMProviderConfig]:
         if self.default_provider_name:
@@ -82,8 +86,10 @@ llm_config = GlobalLLMConfig()
 
 if __name__ == '__main__':
     # Example usage:
+    logging.basicConfig(level=logging.INFO)
     print(f"OpenAI API Key configured: {'Yes' if llm_config.get_api_key('openai') else 'No'}")
     print(f"Anthropic API Key configured: {'Yes' if llm_config.get_api_key('anthropic') else 'No'}")
+    print(f"Groq API Key configured: {'Yes' if llm_config.get_api_key('groq') else 'No'}")
     
     llm_config.set_default_provider('openai')
     default_provider = llm_config.get_default_provider()

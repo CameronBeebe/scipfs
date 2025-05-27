@@ -2,7 +2,7 @@
 import unittest
 import tempfile
 from pathlib import Path
-from scipfs.ipfs import IPFSClient, RuntimeError, FileNotFoundError, SciPFSGoWrapperError
+from scipfs.ipfs import IPFSClient, RuntimeError, SciPFSGoWrapperError, SciPFSFileNotFoundError
 
 class TestIPNSOperations(unittest.TestCase):
     def setUp(self):
@@ -160,7 +160,7 @@ class TestIPNSOperations(unittest.TestCase):
         nonexistent_ipns = "/ipns/QmNonExistentKey123456789"
         
         # 2. Attempt to resolve
-        with self.assertRaises(FileNotFoundError) as context:
+        with self.assertRaises(SciPFSFileNotFoundError) as context:
             self.client.resolve_ipns_name(nonexistent_ipns)
             
         # 3. Verify appropriate error is raised

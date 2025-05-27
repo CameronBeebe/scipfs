@@ -1,6 +1,9 @@
 #!/bin/bash
 # Script to build the scipfs_go_helper executable
 
+set -e # Exit immediately if a command exits with a non-zero status.
+set -u # Treat unset variables as an error when substituting.
+
 echo ">>> Building SciPFS Go Helper <<<"
 
 # Navigate to the directory where scipfs_go_wrapper.go is located

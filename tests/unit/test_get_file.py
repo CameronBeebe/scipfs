@@ -4,7 +4,12 @@ from pathlib import Path
 import tempfile
 import shutil
 import os
-from scipfs.ipfs import IPFSClient, FileNotFoundError, RuntimeError, SciPFSGoWrapperError
+import pytest
+from unittest.mock import patch, MagicMock, mock_open
+import json
+import subprocess
+
+from scipfs.ipfs import IPFSClient, SciPFSFileNotFoundError, RuntimeError, SciPFSGoWrapperError
 
 class TestGetFile(unittest.TestCase):
     def setUp(self):

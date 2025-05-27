@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 import tempfile
 import shutil
-from scipfs.ipfs import IPFSClient, RuntimeError, TimeoutError, ConnectionError
+from scipfs.ipfs import IPFSClient, RuntimeError, TimeoutError, IPFSConnectionError
 
 class TestPinOperations(unittest.TestCase):
     def setUp(self):
@@ -29,7 +29,7 @@ class TestPinOperations(unittest.TestCase):
         # 2. Pin the CID
         try:
             self.client.pin(cid)
-        except (RuntimeError, TimeoutError, ConnectionError) as e:
+        except (RuntimeError, TimeoutError, IPFSConnectionError) as e:
             self.fail(f"Failed to pin valid CID {cid}: {e}")
             
         # 3. Verify CID is in pinned list

@@ -3,7 +3,10 @@ import unittest
 from pathlib import Path
 import tempfile
 import shutil
-from scipfs.ipfs import IPFSClient, FileNotFoundError, ConnectionError, RuntimeError, TimeoutError
+from scipfs.ipfs import IPFSClient, SciPFSFileNotFoundError, IPFSConnectionError, RuntimeError, TimeoutError
+import pytest
+from unittest.mock import patch, MagicMock
+from scipfs.library import Library
 
 class TestAddFileOperations(unittest.TestCase):
     def setUp(self):
@@ -41,7 +44,7 @@ class TestAddFileOperations(unittest.TestCase):
     def test_add_file_nonexistent(self):
         """Test adding a non-existent file."""
         nonexistent_file = Path(self.test_dir) / "nonexistent.txt"
-        with self.assertRaises(FileNotFoundError) as context:
+        with self.assertRaises(SciPFSFileNotFoundError) as context:
             self.client.add_file(nonexistent_file)
         self.assertIn("File not found", str(context.exception))
         
