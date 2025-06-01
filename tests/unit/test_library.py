@@ -57,7 +57,7 @@ class TestLibrary(unittest.TestCase):
         self.assertEqual(saved_manifest_data.get("ipns_key_name"), self.library_name)
         self.assertEqual(saved_manifest_data.get("ipns_name"), "/ipns/k_test_peer_id")
         self.mock_ipfs_client.pin.assert_called_with("QmManifestCID1")
-        self.mock_ipfs_client.publish_to_ipns.assert_called_with(self.library_name, "QmManifestCID1")
+        self.mock_ipfs_client.publish_to_ipns.assert_called_with(self.library_name, "QmManifestCID1", lifetime="24h")
 
     def test_add_file_iso_timestamp(self):
         library = Library(self.library_name, self.config_dir, self.mock_ipfs_client)

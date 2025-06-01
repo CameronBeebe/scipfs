@@ -173,8 +173,9 @@ def init(ctx): # Added ctx
 
 @cli.command()
 @click.argument("name")
+@click.option("--ipns-lifetime", default="24h", show_default=True, help="Set the lifetime for the IPNS record (e.g., '24h', '72h', '30d').")
 @click.pass_context 
-def create(ctx, name: str):
+def create(ctx, name: str, ipns_lifetime: str):
     """Create a new library and its IPNS entry.
 
     Initializes a new library, generates an IPNS key named after the library,
@@ -196,7 +197,7 @@ def create(ctx, name: str):
         
     try:
         library = Library(name, CONFIG_DIR, ipfs_client)
-        library.create() 
+        library.create(ipns_record_lifetime=ipns_lifetime)
         
         if library.ipns_name and library.manifest_cid:
             click.echo(f"Successfully created library '{name}'.")

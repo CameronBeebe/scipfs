@@ -222,6 +222,25 @@ scipfs create my-shared-docs
 # Note: IPNS propagation can take some time.
 ```
 
+#### Customizing IPNS Record Lifetime
+
+When you create a library, its IPNS name is published with a specific lifetime. This lifetime tells other IPFS nodes how long they should consider the record valid before trying to refresh it. By default, SciPFS uses a lifetime of "24h" (24 hours).
+
+You can customize this lifetime using the `--ipns-lifetime` option when creating a library:
+
+```bash
+scipfs create <library_name> --ipns-lifetime <lifetime_value>
+```
+- Replace `<lifetime_value>` with a duration string like "48h" (48 hours), "7d" (7 days), "30d" (30 days), or even longer periods like "8760h" (approximately 1 year).
+- This specified lifetime is stored in the library's manifest. When you later add files to this library and the manifest is republished, SciPFS will automatically reuse this same lifetime, ensuring consistent IPNS record persistence.
+
+Example with custom lifetime:
+```bash
+scipfs create my-longterm-archive --ipns-lifetime 720h # 30 days
+```
+
+This gives you more control over how frequently your library's IPNS record needs to be refreshed by the network.
+
 ### Adding Files to a Library
 
 To add a file to an existing library:
@@ -313,7 +332,6 @@ scipfs join /ipns/k51qkz0x... # Use the actual IPNS name provided by the library
 # Successfully joined library 'someones-library' using IPNS name: /ipns/k51qkz0x...
 # Manifest (CID: Qmabc...) saved to /home/user/.scipfs/someones-library_manifest.json
 ```
-
 ### Updating a Library (Getting Latest Changes)
 
 If you have joined a library, or if you are the owner and changes were made from another machine, you can update your local copy of the library to the latest version published to its IPNS name:
@@ -464,3 +482,4 @@ If you are interested in contributing to SciPFS, please see the [Contributing](h
 ## Contributing
 
 If you are interested in contributing to SciPFS, please see the [Contributing](https://github.com/CameronBeebe/scipfs/blob/main/CONTRIBUTING.md) page for more information.
+

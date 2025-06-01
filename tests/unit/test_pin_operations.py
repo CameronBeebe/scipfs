@@ -33,7 +33,7 @@ class TestPinOperations(unittest.TestCase):
             self.fail(f"Failed to pin valid CID {cid}: {e}")
             
         # 3. Verify CID is in pinned list
-        pinned_cids = self.client.get_pinned_cids()
+        pinned_cids = self.client.list_pinned_cids()
         self.assertIn(cid, pinned_cids,
                      f"Test file CID {cid} not found in pinned CIDs after pinning")
         
@@ -52,7 +52,7 @@ class TestPinOperations(unittest.TestCase):
         try:
             self.client.pin(non_existent_cid)
             # If pin succeeds, verify it's in the pinned list
-            pinned_cids = self.client.get_pinned_cids()
+            pinned_cids = self.client.list_pinned_cids()
             self.assertIn(non_existent_cid, pinned_cids,
                          f"Non-existent CID {non_existent_cid} not found in pinned CIDs after pinning")
         except RuntimeError as e:
@@ -68,7 +68,7 @@ class TestPinOperations(unittest.TestCase):
         self.client.pin(cid)
         
         # 2. Get pinned CIDs
-        pinned_cids = self.client.get_pinned_cids()
+        pinned_cids = self.client.list_pinned_cids()
         
         # 3. Verify test file CID is in list
         self.assertIn(cid, pinned_cids,
@@ -81,11 +81,11 @@ class TestPinOperations(unittest.TestCase):
         # that the method returns a set and doesn't raise an error
         
         # 2. Get pinned CIDs
-        pinned_cids = self.client.get_pinned_cids()
+        pinned_cids = self.client.list_pinned_cids()
         
         # 3. Verify empty set is returned
-        self.assertIsInstance(pinned_cids, set,
-                            "get_pinned_cids did not return a set")
+        self.assertIsInstance(pinned_cids, dict,
+                            "list_pinned_cids did not return a dict")
         
     def test_get_pinned_cids_after_unpin(self):
         """Test getting pinned CIDs after unpinning."""
@@ -101,7 +101,7 @@ class TestPinOperations(unittest.TestCase):
         subprocess.run(["ipfs", "pin", "rm", cid], check=True)
         
         # 3. Get pinned CIDs
-        pinned_cids = self.client.get_pinned_cids()
+        pinned_cids = self.client.list_pinned_cids()
         
         # 4. Verify test file CID is not in list
         self.assertNotIn(cid, pinned_cids,

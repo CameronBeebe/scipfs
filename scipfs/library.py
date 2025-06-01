@@ -22,6 +22,7 @@ class Library:
         self.manifest_cid: Optional[str] = None
         self.ipns_name: Optional[str] = None
         self.ipns_key_name: Optional[str] = None
+        self.ipns_record_lifetime: Optional[str] = None
         self._load_manifest()
 
     def _load_manifest(self) -> None:
@@ -37,6 +38,7 @@ class Library:
                 self.name = self.manifest.get("name", self.name) # Ensure name is consistent
                 self.ipns_key_name = self.manifest.get("ipns_key_name")
                 self.ipns_name = self.manifest.get("ipns_name")
+                self.ipns_record_lifetime = self.manifest.get("ipns_record_lifetime")
                 # self.manifest_cid is now loaded from the file if it was there
                 logger.info("Loaded manifest for library %s from %s (Local CID: %s)", self.name, self.manifest_path, self.manifest_cid)
 
@@ -46,17 +48,20 @@ class Library:
                 self.manifest_cid = None
                 self.ipns_key_name = None
                 self.ipns_name = None
+                self.ipns_record_lifetime = None
             except Exception as e: # Catch other potential errors like file not found during open, though exists() checks first
                 logger.error("Failed to load manifest %s: %s. Initializing empty manifest.", self.manifest_path, e)
                 self.manifest = {"name": self.name, "files": {}}
                 self.manifest_cid = None
                 self.ipns_key_name = None
                 self.ipns_name = None
+                self.ipns_record_lifetime = None
         else:
             self.manifest = {"name": self.name, "files": {}}
             self.manifest_cid = None # Explicitly None for a new, non-existent manifest
             self.ipns_key_name = None
             self.ipns_name = None
+            self.ipns_record_lifetime = None
             logger.info("Initialized new manifest structure in memory for library %s (not saved yet)", self.name)
 
     def _save_manifest(self) -> None:
@@ -66,6 +71,10 @@ class Library:
             self.manifest["ipns_key_name"] = self.ipns_key_name
         if self.ipns_name:
             self.manifest["ipns_name"] = self.ipns_name
+        if self.ipns_record_lifetime: # Store the lifetime in the manifest dictionary for IPFS
+            self.manifest["ipns_record_lifetime"] = self.ipns_record_lifetime
+        elif "ipns_record_lifetime" in self.manifest: # Ensure it's not in manifest if None
+            del self.manifest["ipns_record_lifetime"]
         
         # Add the core manifest (without its own CID yet) to IPFS to get its true CID
         # This self.manifest should NOT contain 'local_manifest_cid' at this point.
@@ -92,21 +101,34 @@ class Library:
         # Publish to IPNS if this instance owns the key
         if self.ipns_key_name and self.manifest_cid:
             try:
-                self.ipfs_client.publish_to_ipns(self.ipns_key_name, self.manifest_cid)
-                logger.info("Published manifest CID %s to IPNS for key %s (IPNS Name: %s)", 
-                            self.manifest_cid, self.ipns_key_name, self.ipns_name)
+                # Use the stored lifetime, or default from ipfs_client if not set (though ipfs.py has its own default)
+                lifetime_to_use = self.ipns_record_lifetime if self.ipns_record_lifetime else "24h"
+                self.ipfs_client.publish_to_ipns(
+                    self.ipns_key_name, 
+                    self.manifest_cid,
+                    lifetime=lifetime_to_use # Pass the lifetime
+                )
+                logger.info("Published manifest CID %s to IPNS for key %s (IPNS Name: %s, Lifetime: %s)", 
+                            self.manifest_cid, self.ipns_key_name, self.ipns_name, lifetime_to_use)
             except Exception as e:
                 # Log error but don't let publish failure stop the whole save process
                 logger.error("Failed to publish manifest to IPNS for key %s: %s", self.ipns_key_name, e)
         else:
             logger.debug("Not publishing to IPNS: ipns_key_name not set or manifest_cid missing.")
 
-    def create(self) -> None:
-        """Create a new library, generate an IPNS key, save manifest, and publish to IPNS."""
+    def create(self, ipns_record_lifetime: str = "24h") -> None:
+        """Create a new library, generate an IPNS key, save manifest, and publish to IPNS.
+
+        Args:
+            ipns_record_lifetime (str, optional): The lifetime for the IPNS record.
+                Determines how long the record is considered valid by other nodes.
+                Defaults to "24h". Examples: "48h", "7d".
+        """
         if self.manifest_path.exists():
             raise ValueError(f"Library configuration file {self.manifest_path} already exists.")
 
         self.ipns_key_name = self.name # Use library name as the IPNS key name
+        self.ipns_record_lifetime = ipns_record_lifetime # Store the passed lifetime
         
         try:
             logger.info("Attempting to generate/retrieve IPNS key: %s", self.ipns_key_name)
@@ -115,13 +137,14 @@ class Library:
             self.ipns_name = f"/ipns/{key_info['Id']}"
             self.manifest["ipns_key_name"] = self.ipns_key_name
             self.manifest["ipns_name"] = self.ipns_name
+            self.manifest["ipns_record_lifetime"] = self.ipns_record_lifetime
             logger.info("Library %s will be addressable via IPNS name: %s (using key: %s)", 
                         self.name, self.ipns_name, self.ipns_key_name)
             
             # Initial save and publish
             self._save_manifest() # This will add to IPFS, pin, save locally, and publish
-            logger.info("Successfully created library %s, initial manifest CID %s, IPNS name %s",
-                        self.name, self.manifest_cid, self.ipns_name)
+            logger.info("Successfully created library %s, initial manifest CID %s, IPNS name %s, IPNS Record Lifetime: %s",
+                        self.name, self.manifest_cid, self.ipns_name, self.ipns_record_lifetime)
 
         except Exception as e:
             logger.error("Failed to create library %s with IPNS integration: %s", self.name, e)
