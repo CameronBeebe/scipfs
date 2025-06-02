@@ -117,6 +117,7 @@ Transform scipfs from a basic file-sharing tool into an intelligent library mana
 ### 1.2. Text Extraction from Files
 
 **Description:** Extract plain text content from uploaded files.
+**Developer Note:** This is foundational for all subsequent LLM-based analysis. Robustness and flexibility here are key.
 
 #### Implementation Details
 
@@ -125,23 +126,45 @@ Transform scipfs from a basic file-sharing tool into an intelligent library mana
 **Python Functionality:**
 
 - `text_extractor.py`:
+  - Initial implementation will use `PyPDF2` for PDFs, and direct reading for `.txt`, `.md`.
+  - **Future Enhancements / Considerations:**
+    - **Robustness:** `PyPDF2` may not be robust for all PDF types (e.g., scanned/image-based PDFs without OCR, complex layouts, password-protected files).
+    - **User-Configurable Pipelines:** Plan for future ability for users to configure their preferred text extraction methods, potentially including:
+      - Local OCR tools.
+      - External scripts (e.g., a user-provided Python script that takes a file path and outputs text).
+      - Integration with local Hugging Face models or other advanced document processing pipelines.
+      - SciPFS could define an interface or expect a specific CLI output from such custom extractors.
+    - `scipfs/config.py` could store preferences for extraction strategies.
 
 ```python
 # scipfs/text_extractor.py (pseudocode)
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 import PyPDF2  # Example for PDF
 # import python-docx, openpyxl, etc.
 # import logging
+# from .config import scipfs_config # To get extraction preferences
 
-def extract_text(file_path: Path) -> Optional[str]:
+# Placeholder for future configurable extractor loading
+# def get_configured_extractor(file_type: str):
+#   pass
+
+def extract_text(file_path: Path, extraction_settings: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    # extraction_settings could in the future specify method ('pypdf2', 'custom_script_path', 'ocr_tool_name')
     try:
-        if file_path.suffix == '.pdf':
+        if file_path.suffix.lower() == '.pdf':
+            # if extraction_settings.get('method') == 'custom_pdf_script':
+            #    return run_custom_script(file_path, extraction_settings.get('script_path'))
+            # Default to PyPDF2
             with open(file_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
-                return "".join(page.extract_text() for page in reader.pages if page.extract_text())
-        elif file_path.suffix == '.txt' or file_path.suffix == '.md':
-            return file_path.read_text()
+                text_parts = [page.extract_text() for page in reader.pages if page.extract_text()]
+                if not text_parts:
+                    # logger.warning(f"PyPDF2 extracted no text from {file_path}. Might be image-based or encrypted.")
+                    return None
+                return "\\n".join(text_parts)
+        elif file_path.suffix.lower() in ['.txt', '.md']: # Add other plain text types
+            return file_path.read_text(encoding='utf-8')
         # Add more handlers for .docx, .pptx, .xlsx
         else:
             # logger.warning(f"Unsupported file type for text extraction: {file_path.suffix}")
@@ -151,24 +174,32 @@ def extract_text(file_path: Path) -> Optional[str]:
         return None
 ```
 
-- `library.py`: `Library.add_file()` calls `extract_text()`
+- `library.py`: `Library.add_file()` calls `extract_text()`.
 
 **Data Strategy (Option B preferred for scalability):**
 
-1. Extract text
-2. If text is substantial, save as `original_filename_extracted.txt`
-3. Add this text file to IPFS: `extracted_text_cid = ipfs_client.add_file(extracted_text_path)`
-4. Store `extracted_text_cid` in the manifest
-5. If text is very small (e.g. < 1KB), consider storing directly in manifest `extracted_text_short` for quick access, but still prefer `extracted_text_cid` for consistency
+1. Extract text using the configured/default extractor.
+2. If text is substantial, save as `original_filename_extracted.txt` (temporary file).
+3. Add this text file to IPFS: `extracted_text_cid = ipfs_client.add_file(extracted_text_path)`.
+4. Store `extracted_text_cid` in the manifest under a `metadata` field for the file.
+5. **Provenance:** Alongside `extracted_text_cid`, store information about how the text was generated. This includes:
+    - SciPFS version (`scipfs.__version__`)
+    - Extraction method/tool used (e.g., "pypdf2", "custom_script", "tika")
+    - Version of the extraction tool/library (if available)
+    - Timestamp of extraction
+    - Optionally, hash of the extractor configuration or script if custom.
+    This provenance data will be stored in a sub-dictionary like `metadata.extraction_provenance`.
+6. If text is very small (e.g. < 1KB), consider storing directly in manifest `extracted_text_short` for quick access, but still prefer `extracted_text_cid` for consistency.
 
-**LLM Integration:** None directly
+**LLM Integration:** None directly in this step, but provides the input for all subsequent LLM processing.
 
 #### Acceptance Criteria
 
-- Text extracted from PDF, TXT, DOCX
-- `extracted_text_cid` (or short text) stored in manifest
+- Text extracted from PDF, TXT, DOCX (initially PDF, TXT, MD).
+- `extracted_text_cid` stored in manifest.
+- **Extraction provenance information is stored alongside `extracted_text_cid` in the manifest.**
 
-**Feasibility:** High for common formats; Medium for very broad format support (might need Tika)
+**Feasibility:** High for common formats (TXT, MD, basic PDFs with PyPDF2); Medium for very broad format support or complex PDF/OCR without dedicated tools. User-configurable pipelines increase complexity but also power.
 
 ### 1.3. LLM-Powered Content Summarization
 
@@ -251,8 +282,8 @@ class LLMClient:
 
 ### 1.5. Manifest Structure & CLI Updates for New Metadata
 
-**Description:** Update manifest and CLI for new metadata.
-**Developer Note:** The manifest structure needs to accommodate CIDs for extracted text, summaries, tags, processing status, and potentially which LLM was used. A `manifest_format_version` field should be added.
+**Description:** Update manifest and CLI for new metadata generated by text extraction and LLM processing.
+**Developer Note:** The manifest structure needs to accommodate CIDs for extracted text, summaries, tags, processing status, and provenance information for each generated artifact. A `manifest_format_version` field should be added/updated.
 
 #### Implementation Details
 
@@ -263,17 +294,45 @@ class LLMClient:
 ```json
 {
     "example.pdf": {
-        "cid": "QmOriginal...",
+        "cid": "QmOriginalFileCID...",
         "size": 12345,
         "added_by": "user_x",
-        "added_timestamp": 1678886400,
-        "original_file_type": ".pdf",
-        "extracted_text_cid": "QmText...",
-        "summary": "This document discusses advanced techniques...",
-        "tags": ["ai", "decentralization", "ipfs"],
-        "llm_processing_status": "completed", // e.g., "pending", "failed_extraction", "failed_summary"
-        "llm_provider_info": {"provider": "openai", "model": "gpt-4o-mini"}, // Optional: record what generated the content
-        "bibtex_cid": "QmBibtex..."
+        "added_timestamp": "2023-10-27T10:00:00Z",
+        "original_file_type": ".pdf", // Store original file type for clarity
+        "metadata": { // New top-level key for all processed metadata
+            "extracted_text_cid": "QmTextContentCID...",
+            "extraction_provenance": {
+                "scipfs_version": "0.2.0",
+                "extractor_type": "pypdf2", // or "custom_script", "tika_v1.24"
+                "extractor_version": "3.0.1", // Version of PyPDF2 used
+                "extraction_timestamp": "2023-10-27T10:05:00Z"
+                // "custom_script_hash": "sha256-abc..." // If a custom script was used
+            },
+            "summary": "This document discusses advanced techniques for content-aware file management using IPFS and LLMs, focusing on semantic search and automated metadata generation.",
+            "summary_provenance": {
+                "scipfs_version": "0.2.0",
+                "llm_provider": "openai",
+                "llm_model": "gpt-4o-mini",
+                "generation_timestamp": "2023-10-27T10:06:00Z"
+            },
+            "tags": ["ai", "decentralization", "ipfs", "llm", "semantic search"],
+            "tags_provenance": { // Similar to summary_provenance
+                "scipfs_version": "0.2.0",
+                "llm_provider": "openai",
+                "llm_model": "gpt-4o-mini", 
+                "generation_timestamp": "2023-10-27T10:07:00Z"
+            },
+            "bibtex_cid": "QmBibtexEntryCID...", // If BibTeX is generated
+            "bibtex_provenance": { // Similar structure
+                // ...
+            },
+            "embeddings_status": "generated", // e.g., "pending", "generated", "failed"
+            "embeddings_provenance": { // Details about embedding model used
+                // ...
+            },
+            "llm_processing_status": "completed_summary_tags", // Overall status: "pending", "failed_extraction", "failed_summary", "completed_text_only", "completed_summary_tags"
+            "last_processed_timestamp": "2023-10-27T10:07:00Z"
+        }
     }
 }
 ```
@@ -281,11 +340,14 @@ class LLMClient:
 **Overall Manifest Structure:**
 ```json
 {
-    "manifest_format_version": "1.1", // Or similar semantic version
+    "manifest_format_version": "1.2", // Increment version due to new metadata structure
     "name": "my_library",
-    "ipns_name": "/ipns/...",
-    "ipns_key_name": "my_library",
-    "latest_manifest_cid": "QmCurrentManifest...",
+    "ipns_name": "/ipns/k51q...",
+    "ipns_key_name": "my_library", // If this node is the owner
+    "description": "A collection of research papers on AI and decentralization.", // User-defined library description
+    "library_tags": ["research", "ai", "decentralized_storage"], // User-defined library tags
+    // "latest_manifest_cid" might be part of local wrapper, not IPFS manifest itself, to avoid recursion.
+    // Or, it's the CID of *this* manifest version when it was last published.
     "files": {
         // ... file entries as above ...
     }
@@ -294,15 +356,16 @@ class LLMClient:
 
 **CLI Updates:**
 
-- `scipfs list <library_name> [--show-summaries] [--show-tags]`
-- `scipfs file-info <library_name> <file_name>` (displays all metadata)
+- `scipfs list <library_name> [--show-summaries] [--show-tags] [--show-provenance]`
+- `scipfs file-info <library_name> <file_name>` (displays all metadata, including provenance details). This command becomes more crucial.
 
 #### Acceptance Criteria
 
-- Manifest correctly stores/loads all new fields
-- CLI displays new metadata
+- Manifest correctly stores/loads all new fields, including the nested `metadata` dictionary and various `provenance` sub-dictionaries.
+- CLI displays new metadata appropriately, with options to control verbosity of provenance information.
+- `manifest_format_version` is updated and handled.
 
-**Feasibility:** High
+**Feasibility:** High for structure; careful implementation needed for backward compatibility if loading older manifests (though a simple warning or "best effort" load might suffice for early versions).
 
 ---
 
@@ -311,41 +374,52 @@ class LLMClient:
 **Priority:** Medium-High - Focus on making libraries more useful and integrated  
 **Overall Feasibility:** Medium - Some features introduce more complexity or external dependencies
 
-### 2.1. Basic Semantic Search (LLM-based, no vector DB)
+### 2.1. Semantic Search MVP (LLM-based, no vector DB)
 
-**Description:** Search within a library based on semantic meaning.
+**Description:** Search within a library based on semantic meaning, using direct LLM calls for relevance scoring. This is the first implementation of semantic search.
 
 #### Implementation Details
 
-**Files:** `scipfs/search.py` (new), `scipfs/cli.py`, `scipfs/llm_utils.py`
+**Files:** `scipfs/llm_utils.py` (new `get_semantic_relevance` method), `scipfs/cli.py` (new `search` command), `scipfs/library.py` (to ensure `add_file` stores `extracted_text_cid` and its provenance correctly).
 
-**Python Functionality:**
+**Functionality:**
 
-- `search.py`: `semantic_search_library(library: Library, query: str, llm_client: LLMClient) -> list[dict]`:
+1.  **CLI Command (`scipfs/cli.py`):**
+    *   Introduce `scipfs search <library_name> "<query_string>"`.
+    *   Options: `--provider <name>`, `--model <name>`, `--threshold <0.0-1.0>`, `--max-results <N>`.
+    *   Initializes `LLMClient` (handles API key and provider/model selection).
+    *   Loads the specified `Library`.
 
-**Algorithm:**
-1. Initialize `results = []`
-2. For each `file_name, file_meta` in `library.manifest["files"].items()`:
-   - `text_to_check = file_meta.get("summary")` (Or fetch full text from `extracted_text_cid` if needed and feasible)
-   - If `text_to_check`:
-     - `score, justification = llm_client.check_semantic_relevance(text_to_check, query)`
-     - If `score > RELEVANCE_THRESHOLD` (e.g., 0.5):
-       - `results.append({"file_name": file_name, "score": score, "justification": justification, "metadata": file_meta})`
-3. Sort `results` by `score` descending
-4. Return `results`
+2.  **Processing Logic (within `search` command):**
+    *   Iterate through each file entry in the library's manifest.
+    *   For each file, retrieve `file_entry.metadata.extracted_text_cid` and `file_entry.metadata.extraction_provenance`.
+    *   If `extracted_text_cid` exists:
+        *   Download the text content from IPFS using `ipfs_client.get_file(extracted_text_cid, temp_path)`.
+        *   Read the text from the temporary file.
+        *   Call `score = llm_client.get_semantic_relevance(query_string, document_text)`.
+        *   If `score >= threshold`, add the file (name, original CID, score, provenance details for context) to a results list.
+        *   Handle errors gracefully (e.g., if text CID is invalid, LLM call fails).
+    *   Sort results by score (descending).
+    *   Display top `N` results, including file name, original CID, and relevance score. Verbose mode can show more details like text CID and provenance.
 
-- `llm_utils.py`: `LLMClient.check_semantic_relevance(text_content: str, query: str) -> tuple[float, str]`:
-  - Prompt: `f"Rate the semantic relevance of the following text to the query: '{query}'. Provide a score from 0.0 (not relevant) to 1.0 (highly relevant), followed by a comma, then a brief justification. Example: 0.85,The text directly addresses the core concepts of the query. Text: {text_content}"`
-  - Parse score and justification
-  - Return `(score, justification)`
+3.  **Relevance Scoring (`scipfs/llm_utils.py`):**
+    *   Implement `LLMClient.get_semantic_relevance(query: str, document_text: str) -> Optional[float]`:
+        *   Constructs a prompt asking the LLM to rate relevance of `document_text` to `query` on a 0.0-1.0 scale, requesting only the numerical score.
+        *   Truncates `document_text` if very long to manage token costs for this specific operation.
+        *   Handles API calls to the configured LLM provider.
+        *   Parses the float score from the response. Includes robust error handling.
 
-- `cli.py`: `scipfs search <library_name> "<search_query>"`
+**Dependencies:**
+    *   Completed Phase 1.1 (LLM Config), 1.2 (Text Extraction with Provenance), and 1.5 (Manifest updates for metadata).
 
 #### Acceptance Criteria
 
-- Returns relevant files ranked by semantic score
+- User can execute `scipfs search <library> "query"` and receive a ranked list of relevant files from that library.
+- Search utilizes `extracted_text_cid` from the manifest.
+- Works with configured LLM providers (OpenAI, Anthropic, Groq, XAI - assuming XAI SDK is usable).
+- CLI output clearly presents search results.
 
-**Feasibility:** Medium - LLM calls for each file can be slow/costly for large libraries. Good for MVP search.
+**Feasibility:** Medium - LLM calls for each file can be slow/costly for large libraries. This is acceptable for an MVP but highlights the need for Phase 3.1 (Vector Embeddings). Robust error handling for IPFS and LLM calls is critical.
 
 ### 2.2. Advanced Metadata Filtering
 
@@ -469,9 +543,9 @@ def filter_files(files_metadata_list: list[dict], tags: list[str] = None, added_
 
 ---
 
-## Phase 3: Advanced Features & Ecosystem Maturity
+## Phase 3: Advanced Features, Data Management & Ecosystem Maturity
 
-**Priority:** Medium-Low - Explore once core content intelligence and key integrations are solid  
+**Priority:** Medium-Low (for new features), but some Data Management aspects from here might be pulled earlier.
 **Overall Feasibility:** Medium - Features here are more complex or rely on a larger user base
 
 ### 3.1. Vector Embeddings for Scalable Semantic Search
@@ -501,8 +575,9 @@ def filter_files(files_metadata_list: list[dict], tags: list[str] = None, added_
 
 - Semantic search uses vector similarity
 - Performance improvement for large libraries
+- **Provenance for embeddings** (model used, generation date) is stored.
 
-**Feasibility:** Medium - Adds dependency on embedding models and vector similarity calculations. Managing embedding stores requires care.
+**Feasibility:** Medium - Adds dependency on embedding models and vector similarity calculations. Managing embedding stores and their CIDs/provenance requires care.
 
 ### 3.2. Asynchronous Processing for LLM Tasks
 
@@ -561,6 +636,66 @@ def filter_files(files_metadata_list: list[dict], tags: list[str] = None, added_
 
 **Feasibility:** Medium - Depends on having efficient similarity measures (embeddings are better here)
 
+### 3.5. Management of Derived Data & User Control (New Section)
+
+**Description:** Provide tools for users to manage the LLM-derived data (extracted text, summaries, tags, embeddings) and control how SciPFS handles this data, especially when interacting with libraries created by others. This addresses concerns about re-computation, storage, and trust.
+
+**Implementation Details:**
+
+**Files:** `scipfs/cli.py`, `scipfs/library.py`, `scipfs/config.py`
+
+**Functionality:**
+
+1.  **Reprocessing LLM-derived Data:**
+    *   **Command:** `scipfs process <library_name> [file_name_or_cid] [--type <text|summary|tags|embeddings|all>] [--force-recompute] [--use-extractor <name_or_path>] [--llm-provider <name>] [--llm-model <name>]`
+    *   **Action:**
+        *   If `file_name_or_cid` is provided, re-processes only that file. Otherwise, processes all files in the library.
+        *   `--type`: Specifies which artifact to regenerate. `text` would re-run text extraction. `summary`, `tags`, `embeddings` would re-generate those using the (newly) extracted text. `all` re-does everything.
+        *   `--force-recompute`: Forces reprocessing even if the artifact already exists and provenance matches current config.
+        *   `--use-extractor`: (Connects to 1.2) Allows specifying a particular text extraction pipeline for this run (e.g., path to a custom script).
+        *   `--llm-provider` / `--llm-model`: Override default LLM for this specific reprocessing task.
+    *   **Manifest Update:** Updates relevant CIDs and provenance information in the manifest.
+    *   **Use Case:** Update to a new SciPFS version, new LLM model, better extraction script, or if an initial processing failed.
+
+2.  **Clearing LLM-derived Data:**
+    *   **Command:** `scipfs clear-metadata <library_name> [file_name_or_cid] --type <extracted_text|summary|tags|embeddings|all_llm_derived|all_metadata>`
+    *   **Action:**
+        *   Removes the specified derived data CIDs and their provenance from the manifest for the given file(s) or library.
+        *   Does **not** by default unpin the associated CIDs from IPFS (could be an option `--unpin-removed-cids`). Users might want to manage IPFS storage separately or other libraries might reference these CIDs.
+        *   `all_llm_derived` would remove summaries, tags, embeddings. `all_metadata` would also remove `extracted_text_cid` and its provenance.
+    *   **Use Case:** Free up manifest space (minor), stop using outdated/incorrect metadata, or prepare for a full re-processing with different settings.
+
+3.  **Enhanced `join` Command:**
+    *   **New Option:** `scipfs join <ipns_name> [--ignore-remote-metadata <text|summary|tags|embeddings|all>]` or `--prefer-local-processing`
+    *   **Action:**
+        *   When joining a library, if `--ignore-remote-metadata text` is used, the local manifest will not store/use the `extracted_text_cid` (and its downstream LLM outputs like summaries) from the publisher's manifest.
+        *   If `all` is used, it ignores all LLM-derived metadata from the remote manifest. The user can then run `scipfs process` locally if they wish to generate this metadata using their own configuration/models.
+    *   **Use Case:** Users who want to use their own specific LLM models, extraction pipelines, or simply don't trust/need the metadata provided by the library publisher. Promotes flexibility and user agency.
+
+4.  **Processing Status Command:**
+    *   **Command:** `scipfs status <library_name> [file_name_or_cid]`
+    *   **Action:** Displays the current status of LLM-derived metadata for files.
+        *   Example output per file:
+            ```
+            File: paper1.pdf
+              - Original CID: Qm...
+              - Extracted Text: Yes (CID: QmText..., Extractor: pypdf2 v3.0.1, Date: ...)
+              - Summary: Yes (Provider: openai/gpt-4o-mini, Date: ...)
+              - Tags: No (Pending/Failed)
+              - Embeddings: Not Processed
+            ```
+    *   **Use Case:** Useful for tracking asynchronous processing (Phase 3.2) or verifying which files have been processed with current settings.
+
+**Data Strategy:**
+*   All these commands will primarily interact with the manifest file by adding, updating, or removing CIDs and provenance information within the `metadata` field of each file entry.
+*   Decisions on pinning/unpinning associated CIDs on IPFS need careful consideration (default to not unpinning on clear, but provide option).
+
+**Feasibility:**
+*   Clearing metadata: High.
+*   `join` with ignore options: Medium (requires careful manifest merging/filtering logic).
+*   Reprocessing command: Medium to High (complexity depends on how granular the controls are).
+*   Status command: Medium.
+
 ---
 
 ## Technology Stack & Key Libraries
@@ -587,24 +722,24 @@ def filter_files(files_metadata_list: list[dict], tags: list[str] = None, added_
 ## Release Milestones
 
 ### v0.2.0: "Intelligent Ingest MVP"
-**Features:** 1.1, 1.2, 1.3, 1.4, 1.5 (Core LLM config, text extraction for PDF/TXT, summarization, tagging, manifest updates)  
-**Goal:** Files added to scipfs are automatically processed for basic content understanding  
+**Features:** 1.1 (Core LLM config), **1.2 (Text Extraction for PDF/TXT/MD with Provenance)**, **1.5 (Manifest updates for metadata including provenance)**, 1.3 (LLM Summarization + Provenance), 1.4 (LLM Tagging + Provenance).
+**Goal:** Files added to scipfs are automatically processed for basic content understanding, and this processing is recorded.
 **Feasibility:** High
 
 ### v0.3.0: "Enhanced Discovery & Scholarly Features"
-**Features:** 2.1 (Basic Semantic Search), 2.2 (Metadata Filtering), 2.3 (BibTeX Integration - initial version, DOI lookup preferred, LLM as fallback)  
-**Goal:** Users can search semantically, filter effectively, and manage academic references  
+**Features:** **2.1 (Semantic Search MVP)**, 2.2 (Metadata Filtering), 2.3 (BibTeX Integration - initial version with provenance). **Initial parts of 3.5 (Management of Derived Data - e.g., `clear-metadata`, basic `process` command).**
+**Goal:** Users can search semantically, filter effectively, manage academic references, and have basic control over derived metadata.
 **Feasibility:** Medium-High
 
-### v0.4.0: "Interoperability & Archival Options"
-**Features:** 2.4 (Initial MCP Integration - expose 1-2 scipfs tools), 2.5 (Filecoin Archival - via service like web3.storage)  
-**Goal:** scipfs starts interacting with the broader ecosystem and offers robust storage solutions  
+### v0.4.0: "Interoperability, User Control & Archival Options"
+**Features:** 2.4 (Initial MCP Integration), 2.5 (Filecoin Archival), **Expanded 3.5 (Advanced `process` options, `join --ignore-remote-metadata`, `status` command). Further development of user-configurable text extraction (from 1.2).**
+**Goal:** scipfs interacts with the broader ecosystem, offers robust storage, and gives users more granular control over data processing.
 **Feasibility:** Medium
 
 ### v0.5.0+: "Scalability & Ecosystem Maturity"
-**Features:** 3.1 (Vector Embeddings for Search), 3.2 (Async Processing for LLM tasks), 3.3 (Library Discovery - Curated Registry MVP), 3.4 (Content Recommendations within library)  
-**Goal:** Improve performance, UX for large ops, and enable wider library discovery  
-**Feasibility:** Medium to Hard (for some parts like decentralized discovery)
+**Features:** 3.1 (Vector Embeddings for Search with Provenance), 3.2 (Async Processing for LLM tasks), 3.3 (Library Discovery - Curated Registry MVP), 3.4 (Content Recommendations within library).
+**Goal:** Improve performance, UX for large ops, and enable wider library discovery.
+**Feasibility:** Medium to Hard (for some parts like decentralized discovery).
 
 ---
 
