@@ -2,6 +2,8 @@ import unittest
 from unittest.mock import MagicMock, patch, mock_open
 from pathlib import Path
 import json
+import shutil
+import tempfile
 from datetime import datetime
 
 # Ensure scipfs modules are importable. Adjust path if tests are run from a different root.
@@ -162,6 +164,88 @@ class TestLibrary(unittest.TestCase):
 
         info_none = library.get_file_info("non_existent_file.txt")
         self.assertIsNone(info_none)
+
+
+class TestRemoteManifestSafety(unittest.TestCase):
+    """Regression tests: joined manifests must not grant key ownership or escape the config dir."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.config_dir = self.tmp / "config"
+        self.config_dir.mkdir()
+        self.client = MagicMock(spec=IPFSClient)
+        self.client.resolve_ipns_name.return_value = "/ipfs/QmRemoteManifest"
+        self.client.add_json.return_value = "QmLocalCopy"
+        self.client.list_ipns_keys.return_value = []
+        self.remote_manifest = {"name": "papers", "files": {}, "ipns_key_name": "papers", "ipns_name": "/ipns/k51owner"}
+        self.client.get_json.side_effect = lambda cid: json.loads(json.dumps(self.remote_manifest))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _join(self):
+        lib = Library("temp_join_placeholder", self.config_dir, self.client)
+        lib.join("/ipns/k51owner")
+        return lib
+
+    def test_join_strips_ipns_key_name_and_never_publishes(self):
+        self._join()
+        with open(self.config_dir / "papers_manifest.json") as f:
+            self.assertNotIn("ipns_key_name", json.load(f))
+        reloaded = Library("papers", self.config_dir, self.client)
+        self.assertIsNone(reloaded.ipns_key_name)
+        reloaded._save_manifest()
+        self.client.publish_to_ipns.assert_not_called()
+
+    def test_untrusted_key_name_not_published_even_if_node_has_same_named_key(self):
+        # A manifest saved by an older version still carries the owner's key name, and this
+        # node happens to hold its own, different key with that name.
+        with open(self.config_dir / "papers_manifest.json", "w") as f:
+            json.dump(self.remote_manifest, f)
+        self.client.list_ipns_keys.return_value = [{"Name": "papers", "Id": "k51mine"}]
+        Library("papers", self.config_dir, self.client)._save_manifest()
+        self.client.publish_to_ipns.assert_not_called()
+
+    def test_owner_holding_key_still_publishes(self):
+        with open(self.config_dir / "papers_manifest.json", "w") as f:
+            json.dump(self.remote_manifest, f)
+        self.client.list_ipns_keys.return_value = [{"Name": "papers", "Id": "k51owner"}]
+        Library("papers", self.config_dir, self.client)._save_manifest()
+        self.client.publish_to_ipns.assert_called_once_with("papers", "QmLocalCopy", lifetime="24h")
+
+    def test_join_rejects_unsafe_library_name(self):
+        for bad in ["../escaped", "/tmp/abs", "a/b", "..", ""]:
+            self.remote_manifest["name"] = bad
+            with self.assertRaises(ValueError):
+                self._join()
+        self.assertEqual(list(self.tmp.rglob("*_manifest.json")), [])
+
+    def test_join_refuses_to_overwrite_different_local_library(self):
+        existing = {"name": "papers", "files": {"mine.pdf": {"cid": "QmMine"}}, "ipns_name": "/ipns/k51mine"}
+        with open(self.config_dir / "papers_manifest.json", "w") as f:
+            json.dump(existing, f)
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self._join()
+        with open(self.config_dir / "papers_manifest.json") as f:
+            self.assertEqual(json.load(f), existing)
+
+    def test_update_strips_key_name_and_rejects_unsafe_rename(self):
+        lib = self._join()
+        self.client.resolve_ipns_name.return_value = "/ipfs/QmRemoteManifest2"
+        self.remote_manifest["files"] = {"new.pdf": {"cid": "QmNew"}}
+        self.assertTrue(lib.update_from_ipns())
+        self.assertNotIn("ipns_key_name", lib.manifest)
+        self.client.resolve_ipns_name.return_value = "/ipfs/QmRemoteManifest3"
+        self.remote_manifest["name"] = "../escaped"
+        with self.assertRaises(ValueError):
+            lib.update_from_ipns()
+
+    def test_update_after_join_does_not_redownload_unchanged_manifest(self):
+        self._join()
+        lib = Library("papers", self.config_dir, self.client)
+        self.assertFalse(lib.update_from_ipns())
+        self.assertEqual(self.client.get_json.call_count, 1) # Only the join fetched it
+
 
 if __name__ == '__main__':
     unittest.main() 

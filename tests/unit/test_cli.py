@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import patch, MagicMock, mock_open, ANY
 from pathlib import Path
 import json
+import os
 import sys
+import tempfile
 
 from click.testing import CliRunner
 
@@ -234,7 +236,7 @@ class TestSciPFSCLI(unittest.TestCase):
             {"name": "file1.txt", "cid": "QmFile1InLib1"}
         ]
         mock_lib_instance.manifest_path.exists.return_value = True
-        mock_lib_instance.manifest = {"ipns_name": "/ipns/k51lib1", "files": {"file1.txt": {"cid": "QmFile1InLib1"}}}
+        mock_lib_instance.manifest = {"name": "lib1", "ipns_name": "/ipns/k51lib1", "files": {"file1.txt": {"cid": "QmFile1InLib1"}}}
 
         with patch('scipfs.cli.CONFIG_DIR') as mock_config_dir:
             mock_manifest_file = MagicMock(spec=Path)
@@ -446,7 +448,9 @@ class TestSciPFSCLI(unittest.TestCase):
         self.assertIn(f"Attempting to pin CID: {test_cid}", result.output)
         self.assertIn(f"Successfully pinned CID: {test_cid}", result.output)
 
-    def test_pin_cid_invalid_format(self):
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_cid_invalid_format(self, MockIPFSClient):
+        MockIPFSClient.return_value.pin.side_effect = SciPFSGoWrapperError("invalid cid: selected encoding not supported")
         result = self.runner.invoke(cli, ['pin', 'cid', 'invalidcidformat'])
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("invalid cid: selected encoding not supported", result.output)
@@ -507,6 +511,7 @@ class TestSciPFSCLI(unittest.TestCase):
     @patch('scipfs.cli.IPFSClient')
     def test_pin_file_success(self, MockIPFSClient):
         mock_ipfs_instance = MockIPFSClient.return_value
+        TEST_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         dummy_file_path_obj = TEST_CONFIG_DIR / "dummy_to_pin.txt"
         expected_cid = "QmDummyFileCID"
 
@@ -523,6 +528,27 @@ class TestSciPFSCLI(unittest.TestCase):
         mock_ipfs_instance.add_file.assert_called_once_with(dummy_file_path_obj, pin=True)
         self.assertIn(f"File '{dummy_file_path_obj.name}' added to IPFS with CID: {expected_cid}", result.output)
         self.assertIn(f"Successfully pinned CID: {expected_cid}", result.output)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_rejects_path_traversal_file_names(self, MockIPFSClient, MockLibrary):
+        mock_library_instance = MockLibrary.return_value
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.list_files.return_value = [{'name': '../escaped.txt', 'cid': 'QmEvil'}]
+
+        mock_library_instance.get_file_info.return_value = {'name': '../escaped.txt', 'cid': 'QmEvil'}
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.chdir(tmp_dir)
+            try:
+                for args in (['get', 'evillib', '--all'], ['get', 'evillib', '../escaped.txt']):
+                    result = self.runner.invoke(cli, args)
+                    self.assertNotEqual(result.exit_code, 0, msg=result.output)
+                    self.assertIn("Unsafe name in manifest", result.output)
+            finally:
+                os.chdir(original_cwd)
+        mock_library_instance.get_file.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main() 

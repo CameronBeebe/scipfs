@@ -2,7 +2,7 @@ import click
 import logging
 from pathlib import Path
 from .ipfs import IPFSClient, SciPFSGoWrapperError, KuboVersionError, IPFSConnectionError as SciPFSIPFSConnectionError # Added KuboVersionError, SciPFSIPFSConnectionError
-from .library import Library
+from .library import Library, safe_name, ensure_within
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
 from . import __version__ as scipfs_version # Import scipfs version
@@ -460,15 +460,14 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
                 # If output_path is not given for --all, use current directory.
                 base_output_dir = output_path if output_path else Path(".")
                 base_output_dir.mkdir(parents=True, exist_ok=True)
-                current_output_path = base_output_dir / actual_file_name
+                # File names come from the (possibly remote) manifest, so keep them inside the target dir.
+                current_output_path = ensure_within(base_output_dir, base_output_dir / safe_name(actual_file_name))
             else: # Single file
-                if output_path:
-                    if output_path.is_dir():
-                        current_output_path = output_path / actual_file_name
-                    else:
-                        current_output_path = output_path # User specified full path
+                if output_path and not output_path.is_dir():
+                    current_output_path = output_path # User specified full path
                 else:
-                    current_output_path = Path(actual_file_name) # Download to current dir with original name
+                    base_output_dir = output_path if output_path else Path(".") # Directory, or current dir with original name
+                    current_output_path = ensure_within(base_output_dir, base_output_dir / safe_name(actual_file_name))
 
             click.echo(f"Downloading '{actual_file_name}' (CID: {cid}) to {current_output_path}...")
             library.get_file(actual_file_name, current_output_path) # get_file_info was called above, direct call to library.get_file

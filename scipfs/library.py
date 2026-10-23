@@ -9,6 +9,25 @@ from .ipfs import IPFSClient, SciPFSFileNotFoundError
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+def safe_name(name: Any) -> str:
+    """Return name if it is safe to use as a single path component, else raise ValueError.
+
+    Library and file names come from manifests fetched over IPNS, so they must not be
+    able to point outside the directory they are joined to.
+    """
+    if (not isinstance(name, str) or not name or name in (".", "..")
+            or "/" in name or "\\" in name or "\0" in name or Path(name).name != name):
+        raise ValueError(f"Unsafe name in manifest: {name!r}")
+    return name
+
+def ensure_within(base_dir: Path, target: Path) -> Path:
+    """Return target if it resolves to a path inside base_dir, else raise ValueError."""
+    try:
+        target.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        raise ValueError(f"Refusing to write outside {base_dir}: {target}")
+    return target
+
 class Library:
     """Manages a decentralized file library on IPFS."""
     
@@ -23,6 +42,8 @@ class Library:
         self.ipns_name: Optional[str] = None
         self.ipns_key_name: Optional[str] = None
         self.ipns_record_lifetime: Optional[str] = None
+        self.resolved_cid: Optional[str] = None # CID the IPNS name last resolved to (joined libraries)
+        self._ipns_key_verified = False # True once we know this node holds the key for ipns_name
         self._load_manifest()
 
     def _load_manifest(self) -> None:
@@ -33,6 +54,7 @@ class Library:
                     loaded_data = json.load(f)
                 
                 self.manifest_cid = loaded_data.pop("local_manifest_cid", None) # Pop it out, store it
+                self.resolved_cid = loaded_data.pop("local_resolved_cid", None)
                 self.manifest = loaded_data # The rest is the actual manifest
 
                 self.name = self.manifest.get("name", self.name) # Ensure name is consistent
@@ -85,6 +107,8 @@ class Library:
         manifest_to_save_locally = self.manifest.copy()
         if self.manifest_cid: # Only add if a CID was successfully generated
             manifest_to_save_locally["local_manifest_cid"] = self.manifest_cid
+        if self.resolved_cid:
+            manifest_to_save_locally["local_resolved_cid"] = self.resolved_cid
         
         # Save the manifest with all info (including its own CID) locally
         with open(self.manifest_path, "w") as f:
@@ -99,7 +123,10 @@ class Library:
             logger.info("Pinned manifest CID %s for library %s", self.manifest_cid, self.name)
 
         # Publish to IPNS if this instance owns the key
-        if self.ipns_key_name and self.manifest_cid:
+        if self.ipns_key_name and self.manifest_cid and not self._holds_ipns_key():
+            logger.warning("Not publishing library %s: this node does not hold IPNS key '%s' for %s.",
+                           self.name, self.ipns_key_name, self.ipns_name)
+        elif self.ipns_key_name and self.manifest_cid:
             try:
                 # Use the stored lifetime, or default from ipfs_client if not set (though ipfs.py has its own default)
                 lifetime_to_use = self.ipns_record_lifetime if self.ipns_record_lifetime else "24h"
@@ -115,6 +142,20 @@ class Library:
                 logger.error("Failed to publish manifest to IPNS for key %s: %s", self.ipns_key_name, e)
         else:
             logger.debug("Not publishing to IPNS: ipns_key_name not set or manifest_cid missing.")
+
+    def _holds_ipns_key(self) -> bool:
+        """Check that the local node holds ipns_key_name and that it is the key behind ipns_name."""
+        if self._ipns_key_verified:
+            return True
+        try:
+            for key_info in self.ipfs_client.list_ipns_keys():
+                if key_info.get("Name") == self.ipns_key_name and \
+                        (not self.ipns_name or self.ipns_name == f"/ipns/{key_info.get('Id')}"):
+                    self._ipns_key_verified = True
+                    return True
+        except Exception as e:
+            logger.warning("Could not list IPNS keys to verify ownership of '%s': %s", self.ipns_key_name, e)
+        return False
 
     def create(self, ipns_record_lifetime: str = "24h") -> None:
         """Create a new library, generate an IPNS key, save manifest, and publish to IPNS.
@@ -135,6 +176,7 @@ class Library:
             key_info = self.ipfs_client.generate_ipns_key(self.ipns_key_name)
             # key_info is {'Name': name, 'Id': peer_id}
             self.ipns_name = f"/ipns/{key_info['Id']}"
+            self._ipns_key_verified = True # We just generated (or retrieved) this key on our node
             self.manifest["ipns_key_name"] = self.ipns_key_name
             self.manifest["ipns_name"] = self.ipns_name
             self.manifest["ipns_record_lifetime"] = self.ipns_record_lifetime
@@ -179,9 +221,17 @@ class Library:
                 # For now, this case should ideally not happen if manifest is well-formed
                 raise ValueError("Manifest fetched from IPNS is missing a 'name' field.")
             
+            new_manifest_path = ensure_within(self.config_dir, self.config_dir / f"{safe_name(manifest_name)}_manifest.json")
+            if new_manifest_path.exists():
+                with open(new_manifest_path, "r") as f:
+                    existing_ipns_name = json.load(f).get("ipns_name")
+                if existing_ipns_name != ipns_name_to_join:
+                    raise ValueError(f"A local library named '{manifest_name}' already exists. Refusing to overwrite it.")
+
             self.name = manifest_name  # Now we're assigning a str to str
-            self.manifest_path = self.config_dir / f"{self.name}_manifest.json" # Update path based on new name
+            self.manifest_path = new_manifest_path # Update path based on new name
             self.manifest_cid = manifest_cid_from_ipns # This is the CID of the manifest we just fetched
+            self.resolved_cid = manifest_cid_from_ipns # Remember it; _save_manifest re-adds an edited copy with a new CID
             
             # Store the IPNS name we joined, but NOT the key_name (as we don't own the key)
             self.ipns_name = ipns_name_to_join
@@ -189,6 +239,7 @@ class Library:
             # Ensure no ipns_key_name is spuriously carried over or set if not owned
             if "ipns_key_name" in self.manifest:
                 logger.debug(f"Manifest downloaded for join from {self.ipns_name} contained an ipns_key_name: {self.manifest['ipns_key_name']}. This will be ignored for the joining node.")
+                del self.manifest["ipns_key_name"] # Never store it locally, or a later load would treat us as the owner
             self.ipns_key_name = None # This instance joining does not own the key by default.
 
             # Save the fetched manifest locally. This will also pin the manifest_cid.
@@ -279,7 +330,7 @@ class Library:
 
             # If self.manifest_cid is None (e.g. new local lib just created but not saved from ipns)
             # or if new CID is different, then update.
-            if self.manifest_cid != new_manifest_cid:
+            if (self.resolved_cid or self.manifest_cid) != new_manifest_cid:
                 logger.info("Current manifest CID for '%s' is '%s'. New manifest CID is '%s'. Updating...",
                             self.name, self.manifest_cid, new_manifest_cid)
                 
@@ -291,25 +342,31 @@ class Library:
                     raise ValueError(f"Fetched manifest from {new_manifest_cid} is malformed.")
 
                 original_name = self.name
+                new_name = safe_name(new_manifest_data["name"])
+                if new_name != original_name:
+                    new_manifest_path = ensure_within(self.config_dir, self.config_dir / f"{new_name}_manifest.json")
+                    if new_manifest_path.exists():
+                        raise ValueError(f"Library was renamed to '{new_name}', but a local library with that name already exists.")
+                new_manifest_data.pop("ipns_key_name", None) # Ownership is local; never adopt it from the network
                 self.manifest = new_manifest_data
-                self.name = self.manifest.get("name", original_name) # Update name if changed
+                self.name = new_name # Update name if changed
                 
                 if self.name != original_name:
                     logger.info("Library name changed from '%s' to '%s' during update. Updating manifest path.",
                                 original_name, self.name)
-                    self.manifest_path = self.config_dir / f"{self.name}_manifest.json"
+                    self.manifest_path = new_manifest_path
                     # If name changes, the old manifest file for original_name might be left behind.
                     # Consider if cleanup is needed, or if it's acceptable. For now, it will just save with new name.
 
                 self.manifest_cid = new_manifest_cid
+                self.resolved_cid = new_manifest_cid
                 
                 # Important: This node is just updating/following. It does not become the owner.
                 # So, ensure ipns_key_name is not adopted from the fetched manifest for publishing purposes.
                 # self.ipns_key_name should remain as it was (likely None if this is a joined library).
                 # _save_manifest already correctly handles not publishing if self.ipns_key_name is not set.
-                # If the fetched manifest *contains* an 'ipns_key_name' from the original publisher,
-                # it will be saved in the local JSON, which is fine for informational purposes.
-                # The critical part is that `self.ipns_key_name` on the *object* is not changed to that value.
+                # Any 'ipns_key_name' from the original publisher was dropped above, because a later
+                # _load_manifest would otherwise adopt it as this node's key.
                 
                 self._save_manifest() # This will save locally and pin. It will NOT republish if self.ipns_key_name is not set.
                 logger.info("Library '%s' successfully updated to manifest CID %s. Local manifest saved.",
