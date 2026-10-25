@@ -194,15 +194,14 @@ class TestIPFSClient(unittest.TestCase):
             self.client._execute_go_wrapper_command_json("some_command_timeout")
 
     @patch('subprocess.run')
-    def test_get_pinned_cids(self, mock_run):
-        expected_pin_cids = ["QmPin1", "QmPin2"]
+    def test_list_pinned_cids(self, mock_run):
         mock_run.return_value = self._mock_subprocess_run(stdout_data={
             "success": True,
-            "data": {"cids": expected_pin_cids}
+            "data": {"QmPin1": "recursive", "QmPin2": "direct"}
         }).return_value
         
-        pins = self.client.get_pinned_cids(timeout=15)
-        self.assertEqual(pins, set(expected_pin_cids))
+        pins = self.client.list_pinned_cids(timeout=15)
+        self.assertEqual(pins, {"QmPin1": {"Type": "recursive"}, "QmPin2": {"Type": "direct"}})
         mock_run.assert_called_once_with(
             [self.client.go_wrapper_path, '-api', self.api_addr, 'list_pinned_cids', '--pin-type', 'all'],
             capture_output=True, text=True, check=False, timeout=15, input=None

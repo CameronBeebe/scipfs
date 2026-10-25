@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import patch, MagicMock, mock_open, ANY
 from pathlib import Path
 import json
+import os
 import sys
+import tempfile
 
 from click.testing import CliRunner
 
@@ -234,7 +236,7 @@ class TestSciPFSCLI(unittest.TestCase):
             {"name": "file1.txt", "cid": "QmFile1InLib1"}
         ]
         mock_lib_instance.manifest_path.exists.return_value = True
-        mock_lib_instance.manifest = {"ipns_name": "/ipns/k51lib1", "files": {"file1.txt": {"cid": "QmFile1InLib1"}}}
+        mock_lib_instance.manifest = {"name": "lib1", "ipns_name": "/ipns/k51lib1", "files": {"file1.txt": {"cid": "QmFile1InLib1"}}}
 
         with patch('scipfs.cli.CONFIG_DIR') as mock_config_dir:
             mock_manifest_file = MagicMock(spec=Path)
@@ -446,7 +448,9 @@ class TestSciPFSCLI(unittest.TestCase):
         self.assertIn(f"Attempting to pin CID: {test_cid}", result.output)
         self.assertIn(f"Successfully pinned CID: {test_cid}", result.output)
 
-    def test_pin_cid_invalid_format(self):
+    @patch('scipfs.cli.IPFSClient')
+    def test_pin_cid_invalid_format(self, MockIPFSClient):
+        MockIPFSClient.return_value.pin.side_effect = SciPFSGoWrapperError("invalid cid: selected encoding not supported")
         result = self.runner.invoke(cli, ['pin', 'cid', 'invalidcidformat'])
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("invalid cid: selected encoding not supported", result.output)
@@ -507,6 +511,7 @@ class TestSciPFSCLI(unittest.TestCase):
     @patch('scipfs.cli.IPFSClient')
     def test_pin_file_success(self, MockIPFSClient):
         mock_ipfs_instance = MockIPFSClient.return_value
+        TEST_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         dummy_file_path_obj = TEST_CONFIG_DIR / "dummy_to_pin.txt"
         expected_cid = "QmDummyFileCID"
 
@@ -523,6 +528,109 @@ class TestSciPFSCLI(unittest.TestCase):
         mock_ipfs_instance.add_file.assert_called_once_with(dummy_file_path_obj, pin=True)
         self.assertIn(f"File '{dummy_file_path_obj.name}' added to IPFS with CID: {expected_cid}", result.output)
         self.assertIn(f"Successfully pinned CID: {expected_cid}", result.output)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_rejects_path_traversal_file_names(self, MockIPFSClient, MockLibrary):
+        mock_library_instance = MockLibrary.return_value
+        mock_library_instance.manifest_path.exists.return_value = True
+        mock_library_instance.list_files.return_value = [{'name': '../escaped.txt', 'cid': 'QmEvil'}]
+
+        mock_library_instance.get_file_info.return_value = {'name': '../escaped.txt', 'cid': 'QmEvil'}
+
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.chdir(tmp_dir)
+            try:
+                for args in (['get', 'evillib', '--all'], ['get', 'evillib', '../escaped.txt']):
+                    result = self.runner.invoke(cli, args)
+                    self.assertNotEqual(result.exit_code, 0, msg=result.output)
+                    self.assertIn("Unsafe name in manifest", result.output)
+            finally:
+                os.chdir(original_cwd)
+        mock_library_instance.get_file.assert_not_called()
+
+    def _mock_two_file_library(self, MockLibrary):
+        lib = MockLibrary.return_value
+        lib.manifest_path.exists.return_value = True
+        lib.list_files.return_value = [{'name': 'a.txt', 'cid': 'QmA'}, {'name': 'b.pdf', 'cid': 'QmB'}]
+        lib.get_file_info.side_effect = lambda n: {'a.txt': {'name': 'a.txt', 'cid': 'QmA'}}.get(n)
+        return lib
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_with_directory_downloads_into_it(self, MockIPFSClient, MockLibrary):
+        lib = self._mock_two_file_library(MockLibrary)
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.chdir(tmp_dir)
+            try:
+                result = self.runner.invoke(cli, ['get', 'mylib', '--all', 'out/nested'])
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertTrue(Path('out/nested').is_dir())
+                lib.get_file_info.assert_not_called()
+                lib.get_file.assert_any_call('a.txt', Path('out/nested') / 'a.txt')
+                lib.get_file.assert_any_call('b.pdf', Path('out/nested') / 'b.pdf')
+                self.assertEqual(lib.get_file.call_count, 2)
+            finally:
+                os.chdir(original_cwd)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_dir_before_flag_and_with_pin(self, MockIPFSClient, MockLibrary):
+        lib = self._mock_two_file_library(MockLibrary)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            target = Path(tmp_dir) / 'dl'
+            result = self.runner.invoke(cli, ['get', 'mylib', str(target), '--all', '--pin'])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertTrue(target.is_dir())
+            lib.get_file.assert_any_call('a.txt', target / 'a.txt')
+            lib.get_file.assert_any_call('b.pdf', target / 'b.pdf')
+            MockIPFSClient.return_value.pin.assert_any_call('QmA')
+            MockIPFSClient.return_value.pin.assert_any_call('QmB')
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_without_directory_uses_cwd(self, MockIPFSClient, MockLibrary):
+        lib = self._mock_two_file_library(MockLibrary)
+        original_cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.chdir(tmp_dir)
+            try:
+                result = self.runner.invoke(cli, ['get', 'mylib', '--all'])
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                lib.get_file.assert_any_call('a.txt', Path('.') / 'a.txt')
+                lib.get_file.assert_any_call('b.pdf', Path('.') / 'b.pdf')
+            finally:
+                os.chdir(original_cwd)
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_all_rejects_two_positionals_and_file_target(self, MockIPFSClient, MockLibrary):
+        lib = self._mock_two_file_library(MockLibrary)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = self.runner.invoke(cli, ['get', 'mylib', '--all', 'a.txt', tmp_dir])
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            existing_file = Path(tmp_dir) / 'not_a_dir'
+            existing_file.write_text('x')
+            result = self.runner.invoke(cli, ['get', 'mylib', '--all', str(existing_file)])
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("not a directory", result.output)
+        lib.get_file.assert_not_called()
+
+    @patch('scipfs.cli.Library')
+    @patch('scipfs.cli.IPFSClient')
+    def test_get_single_file_unchanged(self, MockIPFSClient, MockLibrary):
+        lib = self._mock_two_file_library(MockLibrary)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / 'renamed.txt'
+            result = self.runner.invoke(cli, ['get', 'mylib', 'a.txt', str(dest)])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            lib.get_file.assert_called_once_with('a.txt', dest)
+            lib.get_file.reset_mock()
+            result = self.runner.invoke(cli, ['get', 'mylib', 'a.txt', tmp_dir])
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            lib.get_file.assert_called_once_with('a.txt', Path(tmp_dir) / 'a.txt')
 
 if __name__ == '__main__':
     unittest.main() 

@@ -2,7 +2,7 @@ import click
 import logging
 from pathlib import Path
 from .ipfs import IPFSClient, SciPFSGoWrapperError, KuboVersionError, IPFSConnectionError as SciPFSIPFSConnectionError # Added KuboVersionError, SciPFSIPFSConnectionError
-from .library import Library
+from .library import Library, safe_name, ensure_within
 import sys # Import sys for exit
 from . import config as scipfs_config # Import the new config module
 from . import __version__ as scipfs_version # Import scipfs version
@@ -394,11 +394,10 @@ def list_cmd(ctx, name: str): # Added ctx
 def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], all_files: bool, pin_file_flag: bool): # Added ctx, optional types
     """Download file(s) from the specified library.
 
-    If --all is specified, downloads all files in the library.
-    The FILE_NAME argument is ignored if --all is used.
-    If OUTPUT_PATH is provided with --all, it's used as the target directory.
-    If OUTPUT_PATH is not provided with --all, files are downloaded into a
-    new directory named after the library in the current working directory.
+    If --all is specified, downloads all files in the library. With --all,
+    the single optional positional argument after NAME is the target
+    directory (created if missing); if omitted, files are downloaded into
+    the current working directory.
 
     When not using --all, FILE_NAME and OUTPUT_PATH are required to specify
     which file to download and where to save it.
@@ -408,8 +407,8 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
 
     Arguments:
       NAME: The name of the library.
-      FILE_NAME: The name of the file to download (ignored if --all is used).
-      OUTPUT_PATH: Local path to save the file, or directory for --all.
+      FILE_NAME: The name of the file to download (with --all: the target directory).
+      OUTPUT_PATH: Local path to save the file (not used with --all).
 
     Examples:
       scipfs get my-library report.pdf ./downloads/report.pdf
@@ -425,8 +424,16 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
     if not file_name and not all_files:
         click.echo("Error: Specify a file name, or use --all to download all files.", err=True)
         sys.exit(1)
-    if file_name and all_files:
-        click.echo("Error: Cannot specify a file name and use --all simultaneously.", err=True)
+    if all_files and file_name:
+        # With --all, click binds the optional directory to the FILE_NAME slot
+        # (`scipfs get <lib> --all <dir>`), so treat it as the target directory.
+        if output_path is not None:
+            click.echo("Error: With --all, give at most one output directory (no file name).", err=True)
+            sys.exit(1)
+        output_path = Path(file_name)
+        file_name = None
+    if all_files and output_path is not None and output_path.exists() and not output_path.is_dir():
+        click.echo(f"Error: Output path '{output_path}' exists and is not a directory.", err=True)
         sys.exit(1)
         
     try:
@@ -460,15 +467,14 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
                 # If output_path is not given for --all, use current directory.
                 base_output_dir = output_path if output_path else Path(".")
                 base_output_dir.mkdir(parents=True, exist_ok=True)
-                current_output_path = base_output_dir / actual_file_name
+                # File names come from the (possibly remote) manifest, so keep them inside the target dir.
+                current_output_path = ensure_within(base_output_dir, base_output_dir / safe_name(actual_file_name))
             else: # Single file
-                if output_path:
-                    if output_path.is_dir():
-                        current_output_path = output_path / actual_file_name
-                    else:
-                        current_output_path = output_path # User specified full path
+                if output_path and not output_path.is_dir():
+                    current_output_path = output_path # User specified full path
                 else:
-                    current_output_path = Path(actual_file_name) # Download to current dir with original name
+                    base_output_dir = output_path if output_path else Path(".") # Directory, or current dir with original name
+                    current_output_path = ensure_within(base_output_dir, base_output_dir / safe_name(actual_file_name))
 
             click.echo(f"Downloading '{actual_file_name}' (CID: {cid}) to {current_output_path}...")
             library.get_file(actual_file_name, current_output_path) # get_file_info was called above, direct call to library.get_file
