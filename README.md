@@ -292,8 +292,8 @@ To download all files from a library:
 scipfs get <library_name> --all [<output_directory>] [--pin]
 ```
 
-- If `<output_directory>` is provided, files are saved there.
-- If `<output_directory>` is omitted, files are saved into a new directory named after the library in your current location.
+- If `<output_directory>` is provided, files are saved there (the directory is created if it doesn't exist).
+- If `<output_directory>` is omitted, files are saved into your current directory.
 - `--pin` (Optional): If specified, all downloaded files will also be pinned to your local IPFS node.
 
 Examples:
@@ -307,7 +307,7 @@ scipfs get my-research-papers report.pdf ./downloads/report.pdf --pin
 # Download all files to a specific directory
 scipfs get my-research-papers --all ./all_my_papers/
 
-# Download and pin all files to a default directory (./my-research-papers/)
+# Download and pin all files into the current directory
 scipfs get my-research-papers --all --pin
 ```
 

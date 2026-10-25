@@ -394,11 +394,10 @@ def list_cmd(ctx, name: str): # Added ctx
 def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], all_files: bool, pin_file_flag: bool): # Added ctx, optional types
     """Download file(s) from the specified library.
 
-    If --all is specified, downloads all files in the library.
-    The FILE_NAME argument is ignored if --all is used.
-    If OUTPUT_PATH is provided with --all, it's used as the target directory.
-    If OUTPUT_PATH is not provided with --all, files are downloaded into a
-    new directory named after the library in the current working directory.
+    If --all is specified, downloads all files in the library. With --all,
+    the single optional positional argument after NAME is the target
+    directory (created if missing); if omitted, files are downloaded into
+    the current working directory.
 
     When not using --all, FILE_NAME and OUTPUT_PATH are required to specify
     which file to download and where to save it.
@@ -408,8 +407,8 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
 
     Arguments:
       NAME: The name of the library.
-      FILE_NAME: The name of the file to download (ignored if --all is used).
-      OUTPUT_PATH: Local path to save the file, or directory for --all.
+      FILE_NAME: The name of the file to download (with --all: the target directory).
+      OUTPUT_PATH: Local path to save the file (not used with --all).
 
     Examples:
       scipfs get my-library report.pdf ./downloads/report.pdf
@@ -425,8 +424,16 @@ def get(ctx, name: str, file_name: Optional[str], output_path: Optional[Path], a
     if not file_name and not all_files:
         click.echo("Error: Specify a file name, or use --all to download all files.", err=True)
         sys.exit(1)
-    if file_name and all_files:
-        click.echo("Error: Cannot specify a file name and use --all simultaneously.", err=True)
+    if all_files and file_name:
+        # With --all, click binds the optional directory to the FILE_NAME slot
+        # (`scipfs get <lib> --all <dir>`), so treat it as the target directory.
+        if output_path is not None:
+            click.echo("Error: With --all, give at most one output directory (no file name).", err=True)
+            sys.exit(1)
+        output_path = Path(file_name)
+        file_name = None
+    if all_files and output_path is not None and output_path.exists() and not output_path.is_dir():
+        click.echo(f"Error: Output path '{output_path}' exists and is not a directory.", err=True)
         sys.exit(1)
         
     try:
